@@ -56,7 +56,7 @@ episode_YYYYMMDD_HHMMSS_클래스명.h5
 
 ### 2. 통합 수집기 실행
 ```bash
-python scripts/signglove_unified_collector.py
+python integration/signglove_unified_collector.py
 ```
 
 ### 3. 키보드 조작
@@ -84,7 +84,7 @@ Q: 프로그램 종료
 - **우선순위 3 (복합/숫자)**: 50-60개 에피소드
 
 ### 자동 진행률 추적
-- `data/signglove_unified/collection_progress.json`
+- `datasets/unified/collection_progress.json`
 - H5 파일 자동 스캔
 - 실시간 완료도 표시
 
