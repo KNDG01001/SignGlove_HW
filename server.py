@@ -137,6 +137,8 @@ class SignGloveUnifiedCollector:
         
         # 클래스 선택 모드
         self.class_selection_mode = False
+        self.initial_posture_reference: Optional[SignGloveSensorReading] = None # 초기 자세 기준값
+        self.realtime_print_enabled = False # 실시간 센서 값 출력 토글
         
         self.load_collection_progress()
         print("✅ SignGlove 통합 수집기 준비 완료!")
@@ -151,7 +153,9 @@ class SignGloveUnifiedCollector:
         print("   C: 시리얼 포트 연결/재연결")
         print("   N: 새 에피소드 시작 (클래스 선택)")
         print("   M: 현재 에피소드 종료")
-        print("   I: 초기 자세 확인")
+        print("   I: 현재 자세가 초기 자세와 일치하는지 확인")
+        print("   S: 현재 자세를 초기 자세 기준으로 설정")
+        print("   T: 실시간 센서 값 출력 토글")
         print("   P: 진행 상황 확인")
         print("   R: 진행률 재계산 (H5 파일 스캔)")
         print("   Q: 프로그램 종료")
@@ -273,7 +277,7 @@ class SignGloveUnifiedCollector:
                         
                     # CSV 형식 파싱: timestamp,pitch,roll,yaw,accel_x,accel_y,accel_z,flex1,flex2,flex3,flex4,flex5
                     parts = line.split(',')
-                    if len(parts) == 9:
+                    if len(parts) == 12: # Changed from 9 to 12
                         try:
                             recv_time_ms = int(time.time() * 1000)
                             arduino_ts = int(float(parts[0]))
@@ -285,22 +289,29 @@ class SignGloveUnifiedCollector:
                                 sampling_hz = 1000.0 / dt_ms
                             last_arduino_ms = arduino_ts
                             
-                            # 센서 데이터 생성 (가속도 데이터는 아두이노에서 전송되지 않으므로 기본값 사용)
+                            # 센서 데이터 생성 (가속도 데이터 포함)
                             reading = SignGloveSensorReading(
-                                timestamp_ms=arduino_ts, # 추가
+                                timestamp_ms=arduino_ts,
                                 recv_timestamp_ms=recv_time_ms,
                                 pitch=float(parts[1]),
                                 roll=float(parts[2]),
                                 yaw=float(parts[3]),
-                                flex1=int(parts[4]),
-                                flex2=int(parts[5]),
-                                flex3=int(parts[6]),
-                                flex4=int(parts[7]),
-                                flex5=int(parts[8]),
-                                sampling_hz=sampling_hz # 추가
-                                # accel_x, accel_y, accel_z는 dataclass의 기본값 사용
+                                accel_x=float(parts[4]), # Added accel_x
+                                accel_y=float(parts[5]), # Added accel_y
+                                accel_z=float(parts[6]), # Added accel_z
+                                flex1=int(parts[7]), # Adjusted index
+                                flex2=int(parts[8]), # Adjusted index
+                                flex3=int(parts[9]), # Adjusted index
+                                flex4=int(parts[10]), # Adjusted index
+                                flex5=int(parts[11]), # Adjusted index
+                                sampling_hz=sampling_hz
                             )
                             
+                            
+                            # 실시간 출력 활성화 시 센서 값 출력
+                            if self.realtime_print_enabled:
+                                print(f"📊 {reading.timestamp_ms}ms | P:{reading.pitch:.1f}, R:{reading.roll:.1f}, Y:{reading.yaw:.1f} | AX:{reading.accel_x:.2f}, AY:{reading.accel_y:.2f}, AZ:{reading.accel_z:.2f} | F1:{reading.flex1}, F2:{reading.flex2}, F3:{reading.flex3}, F4:{reading.flex4}, F5:{reading.flex5} | {sampling_hz:.1f}Hz")
+
                             # 큐에 추가
                             if not self.data_queue.full():
                                 self.data_queue.put(reading)
@@ -310,6 +321,13 @@ class SignGloveUnifiedCollector:
                                 self.episode_data.append(reading)
                                 if len(self.episode_data) % 20 == 0:  # 20샘플마다 로그
                                     print(f"📊 수집 중... {len(self.episode_data)}개 샘플 (현재: {sampling_hz:.1f}Hz)")
+                                
+                                # 300개 샘플 단위로 에피소드 자동 종료 및 재시작
+                                if len(self.episode_data) >= 300:
+                                    print(f"✅ {self.current_class} 클래스 300개 샘플 수집 완료. 에피소드를 종료하고 재시작합니다.")
+                                    self.stop_episode()
+                                    # 동일 클래스로 새 에피소드 즉시 시작
+                                    self.start_episode(self.current_class)
                                     
                         except (ValueError, IndexError) as e:
                             print(f"⚠️ 데이터 파싱 오류: {line} → {e}")
@@ -558,56 +576,71 @@ class SignGloveUnifiedCollector:
             return "unknown"
 
     def check_initial_posture(self, reading: Optional[SignGloveSensorReading] = None) -> bool:
-        """초기 자세 확인"""
+        """현재 자세가 초기 자세 기준과 일치하는지 확인"""
+        if self.initial_posture_reference is None:
+            print("⚠️ 초기 자세 기준이 설정되지 않았습니다. 'S' 키를 눌러 현재 자세를 기준으로 설정하세요.")
+            return False
+
         if reading is None:
             try:
                 # 큐에서 최신 데이터 가져오기 (블로킹 없이)
                 reading = self.data_queue.get_nowait()
             except queue.Empty:
-                print("⚠️ 센서 데이터가 없습니다. 아두이노 연결을 확인하세요.")
+                print("⚠️ 센서 데이터가 없습니다. 아두이노 연결을 확인하거나 데이터 수신을 기다리세요.")
                 return False
 
-        # 초기 자세 임계값 정의 (실험을 통해 조정 필요)
-        initial_posture_thresholds = {
-            'pitch': (-15, 15),
-            'roll': (-15, 15),
-            'yaw': (-15, 15),
-            'flex1': (0, 150),
-            'flex2': (0, 150),
-            'flex3': (0, 150),
-            'flex4': (0, 150),
-            'flex5': (0, 150),
-        }
+        # 초기 자세 비교를 위한 허용 오차 (실험을 통해 조정 필요)
+        POSTURE_TOLERANCE_IMU = 5.0  # IMU (Pitch, Roll, Yaw) 허용 오차 (도)
+        POSTURE_TOLERANCE_FLEX = 20  # Flex 센서 허용 오차 (ADC 값)
 
         is_initial_posture = True
         feedback = []
 
         # Pitch 확인
-        if not (initial_posture_thresholds['pitch'][0] <= reading.pitch <= initial_posture_thresholds['pitch'][1]):
+        if not (abs(reading.pitch - self.initial_posture_reference.pitch) <= POSTURE_TOLERANCE_IMU):
             is_initial_posture = False
-            feedback.append(f"  - 손목을 수평으로 유지하세요 (Pitch: {reading.pitch:.1f})")
+            feedback.append(f"  - 손목 Pitch가 기준과 다릅니다 (현재: {reading.pitch:.1f}, 기준: {self.initial_posture_reference.pitch:.1f})")
         
         # Roll 확인
-        if not (initial_posture_thresholds['roll'][0] <= reading.roll <= initial_posture_thresholds['roll'][1]):
+        if not (abs(reading.roll - self.initial_posture_reference.roll) <= POSTURE_TOLERANCE_IMU):
             is_initial_posture = False
-            feedback.append(f"  - 손바닥이 아래를 향하게 하세요 (Roll: {reading.roll:.1f})")
+            feedback.append(f"  - 손목 Roll이 기준과 다릅니다 (현재: {reading.roll:.1f}, 기준: {self.initial_posture_reference.roll:.1f})")
+
+        # Yaw는 초기 자세 판단에 사용하지 않음 (드리프트 문제)
+        # if not (abs(reading.yaw - self.initial_posture_reference.yaw) <= POSTURE_TOLERANCE_IMU):
+        #     is_initial_posture = False
+        #     feedback.append(f"  - 손목 Yaw가 기준과 다릅니다 (현재: {reading.yaw:.1f}, 기준: {self.initial_posture_reference.yaw:.1f})")
 
         # Flex 센서 확인
         for i in range(1, 6):
             flex_key = f'flex{i}'
-            flex_val = getattr(reading, flex_key)
-            if not (initial_posture_thresholds[flex_key][0] <= flex_val <= initial_posture_thresholds[flex_key][1]):
+            current_flex_val = getattr(reading, flex_key)
+            ref_flex_val = getattr(self.initial_posture_reference, flex_key)
+            if not (abs(current_flex_val - ref_flex_val) <= POSTURE_TOLERANCE_FLEX):
                 is_initial_posture = False
-                feedback.append(f"  - {i}번 손가락을 펴세요 ({flex_key}: {flex_val})")
+                feedback.append(f"  - {i}번 손가락 Flex가 기준과 다릅니다 (현재: {current_flex_val}, 기준: {ref_flex_val})")
 
         if is_initial_posture:
-            print("✅ 초기 자세가 올바릅니다.")
+            print("✅ 현재 자세가 초기 자세 기준과 일치합니다.")
             return True
         else:
-            print("❌ 초기 자세가 올바르지 않습니다. 아래를 참고하여 자세를 교정하세요:")
+            print("❌ 현재 자세가 초기 자세 기준과 일치하지 않습니다. 아래를 참고하여 자세를 교정하세요:")
             for msg in feedback:
                 print(msg)
             return False
+
+    #def load_collection_progress(self):
+
+    def set_initial_posture(self):
+        """현재 센서 값을 초기 자세 기준으로 설정"""
+        try:
+            # 큐에서 최신 데이터 가져오기 (블로킹 없이)
+            reading = self.data_queue.get_nowait()
+            self.initial_posture_reference = reading
+            print("✅ 현재 자세가 초기 자세 기준으로 설정되었습니다.")
+            print(f"   기준값: Pitch:{reading.pitch:.1f}, Roll:{reading.roll:.1f}, Yaw:{reading.yaw:.1f} | Flex:{reading.flex1},{reading.flex2},{reading.flex3},{reading.flex4},{reading.flex5}")
+        except queue.Empty:
+            print("⚠️ 센서 데이터가 없습니다. 아두이노 연결을 확인하거나 데이터 수신을 기다리세요.")
 
     def load_collection_progress(self):
         """수집 진행상황 로드"""
@@ -700,6 +733,18 @@ class SignGloveUnifiedCollector:
             self.class_selection_mode = False
             print("🚫 클래스 선택이 취소되었습니다.")
             
+        elif key == 'i':
+            print("🧘 현재 자세가 초기 자세 기준과 일치하는지 확인 중...")
+            self.check_initial_posture()
+        elif key == 's':
+            print("✨ 현재 자세를 초기 자세 기준으로 설정합니다...")
+            self.set_initial_posture()
+        elif key == 't':
+            self.realtime_print_enabled = not self.realtime_print_enabled
+            if self.realtime_print_enabled:
+                print("✅ 실시간 센서 값 출력이 활성화되었습니다.")
+            else:
+                print("❌ 실시간 센서 값 출력이 비활성화되었습니다.")
         else:
             if not self.class_selection_mode:
                 print(f"⚠️ 알 수 없는 키: {key.upper()}")
