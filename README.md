@@ -142,6 +142,7 @@ episode_20250126_153000_ㄱ.h5:
 
 - [`integration/README_UNIFIED_COLLECTOR.md`](integration/README_UNIFIED_COLLECTOR.md) - 통합 수집기 상세 가이드
 - [`datasets/README.md`](datasets/README.md) - 데이터셋 구조 및 활용법
+- [`EXPERIMENT_DESIGN.md`](EXPERIMENT_DESIGN.md) - 실험 설계 및 데이터 수집 프로토콜
 
 ---
 
