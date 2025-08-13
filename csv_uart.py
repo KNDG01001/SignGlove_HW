@@ -2,9 +2,7 @@ import serial
 import csv
 from datetime import datetime
 import time
-
-# ---------- 시리얼 포트 설정 ----------
-SERIAL_PORT = 'COM6'  # 또는 'COM3' (윈도우일 경우)
+SERIAL_PORT = 'COM6' 
 BAUD_RATE = 115200
 
 # ---------- CSV 파일 설정 ----------
