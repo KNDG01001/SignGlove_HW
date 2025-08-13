@@ -42,7 +42,7 @@ except Exception as e:
 # ---------- CSV 파일 열기 ----------
 with open(csv_filename, mode='w', newline='') as file:
     writer = csv.writer(file)
-    writer.writerow(['timestamp(ms)', 'pitch(°)', 'roll(°)', 'yaw(°)', 'flex1', 'flex2', 'flex3', 'flex4', 'flex5'])
+    writer.writerow(['timestamp(ms)', 'pitch(°)', 'roll(°)', 'yaw(°)', 'accel_x(g)', 'accel_y(g)', 'accel_z(g)', 'flex1', 'flex2', 'flex3', 'flex4', 'flex5'])
 
     try:
         while True:
@@ -53,12 +53,12 @@ with open(csv_filename, mode='w', newline='') as file:
             debug_print(f"Received: {line}")
             row = line.split(',')
 
-            if len(row) == 9:
+            if len(row) == 12:  # timestamp + pitch/roll/yaw + accel_xyz + flex12345
                 writer.writerow(row)
                 file.flush()
                 print("✔️ Data saved:", row)
             else:
-                print("❌ Invalid format (expected 9 values):", row)
+                print("❌ Invalid format (expected 12 values):", row)
 
     except KeyboardInterrupt:
         print("\n[!] Stopped by user")
