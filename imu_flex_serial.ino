@@ -1,212 +1,228 @@
 #include <Arduino_LSM6DS3.h>
 
-// -------------------- 설정 --------------------
-const int FLEX_PINS[5] = {A0, A1, A2, A3, A6}; // Nano 33 IoT 기준
-const unsigned long DEFAULT_INTERVAL_MS = 250;   // 기본 50Hz
-const unsigned long MIN_INTERVAL_MS = 2;        // 500Hz 한계치 가정 (실효는 전송속도에 좌우됨)
+// ==================== 설정 ====================
+const int FLEX_PINS[5] = {A0, A1, A2, A3, A6};  // Nano 33 IoT
+const unsigned long DEFAULT_INTERVAL_MS = 20;    // 기본 50Hz
+const unsigned long MIN_INTERVAL_MS     = 2;     // 하한(보레이트/부하에 따라 실효 낮을 수 있음)
 
-// -------------------- 상태 변수 --------------------
+// 보완 필터 계수(가속도 vs 자이로)
+float kAlpha = 0.98f;
+
+// 자이로 축 게인(부호만 간단히 조정)
+const float GAIN_GX = +1.0f;
+const float GAIN_GY = +1.0f;
+const float GAIN_GZ = +1.0f;
+
+// ===== 축 매핑(0:X, 1:Y, 2:Z) =====
+// 손등 장착에서 굴곡/신전이 보통 Y축으로 크게 나오는 경우가 많음 → roll=Y, pitch=X 가정
+int ROLL_AXIS  = 1;  // 1=Y
+int PITCH_AXIS = 0;  // 0=X
+
+// ==================== 상태 변수 ====================
 unsigned long sampleIntervalMs = DEFAULT_INTERVAL_MS;
-unsigned long lastSampleUs = 0;     // micros() 기반 타이밍
-bool connected = false;             // USB CDC 연결 상태 추적
+unsigned long lastTickUs = 0;
+bool connected = false;
 
-// -------------------- 유틸 --------------------
+// 자이로 바이어스(오프셋)
+float bias_x = 0.0f, bias_y = 0.0f, bias_z = 0.0f;
+
+// 각도(°) 상태(보완필터 결과)
+float pitch_deg = 0.0f, roll_deg = 0.0f, yaw_deg = 0.0f;
+
+// 마지막 유효 원시 샘플(읽기 실패 시 재사용)
+float last_gx=0, last_gy=0, last_gz=0, last_ax=0, last_ay=0, last_az=1.0f;
+
+// ==================== 유틸 ====================
 void clearSerialBuffers() {
-  // RX 버퍼 비우기
-  while (Serial.available()) {
-    Serial.read();
-  }
-  // TX 버퍼는 전송 완료 대기만 수행 (아두이노 1.0 이후 flush 의미)
+  while (Serial.available()) Serial.read();
   Serial.flush();
 }
 
 void sendCsvHeader() {
-<<<<<<< HEAD
-  Serial.println(F("timestamp,pitch,roll,yaw,flex1,flex2,flex3,flex4,flex5"));
-=======
   Serial.println(F("timestamp,pitch,roll,yaw,accel_x,accel_y,accel_z,flex1,flex2,flex3,flex4,flex5"));
->>>>>>> 0d2af155f806d0e736fc8855001b1a1be94db679
 }
 
+void printCsvRow(unsigned long ts, float pitch, float roll, float yaw,
+                 float ax, float ay, float az, const int flex[5]) {
+  Serial.print(ts);           Serial.print(',');
+  Serial.print(pitch, 2);     Serial.print(',');
+  Serial.print(roll, 2);      Serial.print(',');
+  Serial.print(yaw, 2);       Serial.print(',');
+  Serial.print(ax, 3);        Serial.print(',');
+  Serial.print(ay, 3);        Serial.print(',');
+  Serial.print(az, 3);
+  for (int i = 0; i < 5; i++) { Serial.print(','); Serial.print(flex[i]); }
+  Serial.println();
+}
+
+void calibrateGyroBias(unsigned samples = 200, unsigned delay_ms = 5) {
+  bias_x = bias_y = bias_z = 0.0f;
+  unsigned cnt = 0;
+  for (unsigned i = 0; i < samples; i++) {
+    float gx, gy, gz;
+    if (IMU.gyroscopeAvailable() && IMU.readGyroscope(gx, gy, gz)) {
+      bias_x += gx; bias_y += gy; bias_z += gz; cnt++;
+    }
+    delay(delay_ms);
+  }
+  if (cnt > 0) { bias_x /= cnt; bias_y /= cnt; bias_z /= cnt; }
+}
+
+inline void accelToAngles(float ax, float ay, float az,
+                          float &pitch_acc_deg, float &roll_acc_deg) {
+  pitch_acc_deg = atan2f(-ax, sqrtf(ay*ay + az*az)) * 180.0f / PI;
+  roll_acc_deg  = atan2f( ay, az) * 180.0f / PI;
+}
+
+float pickAxis(int axis, float x, float y, float z) {
+  if (axis == 0) return x;
+  if (axis == 1) return y;
+  return z;
+}
+
+// 명령: interval,<ms> / header / flush / recal / alpha,<0~1> / axis,<roll:x|y|z>,<pitch:x|y|z>
 void handleIncomingCommand() {
-  // 한 줄 단위 커맨드 처리 (예: "interval,20\n")
   static char lineBuf[64];
   static size_t idx = 0;
 
   while (Serial.available()) {
     char c = (char)Serial.read();
     if (c == '\r') continue;
-
     if (c == '\n') {
-      lineBuf[idx] = '\0';
-      idx = 0;
+      lineBuf[idx] = '\0'; idx = 0;
 
-      // 파싱
-      // 포맷: interval,<ms>
-      // 공백 제거 없이 단순 파싱
       if (strncmp(lineBuf, "interval,", 9) == 0) {
-        const char* p = lineBuf + 9;
-        long val = atol(p);
-        if (val <= 0) {
-          // 무시
-        } else {
+        long val = atol(lineBuf + 9);
+        if (val > 0) {
           if ((unsigned long)val < MIN_INTERVAL_MS) val = (long)MIN_INTERVAL_MS;
           sampleIntervalMs = (unsigned long)val;
-          // 적용 사실을 에코(로그)
-          Serial.print(F("# interval(ms) set to "));
-          Serial.println(sampleIntervalMs);
+          Serial.print(F("# interval(ms) set to ")); Serial.println(sampleIntervalMs);
         }
       } else if (strcmp(lineBuf, "header") == 0) {
         sendCsvHeader();
       } else if (strcmp(lineBuf, "flush") == 0) {
-        clearSerialBuffers();
-        Serial.println(F("# flushed"));
+        clearSerialBuffers(); Serial.println(F("# flushed"));
+      } else if (strncmp(lineBuf, "alpha,", 6) == 0) {
+        float a = atof(lineBuf + 6);
+        if (a >= 0.0f && a <= 1.0f) {
+          kAlpha = a;
+          Serial.print(F("# alpha set to ")); Serial.println(kAlpha, 3);
+        } else {
+          Serial.println(F("# alpha must be 0..1"));
+        }
+      } else if (strcmp(lineBuf, "recal") == 0) {
+        Serial.println(F("# recalibrating gyro bias... keep still"));
+        calibrateGyroBias();
+        Serial.println(F("# recal done"));
+      } else if (strncmp(lineBuf, "axis,", 5) == 0) {
+        // 예: axis,roll:y,pitch:x
+        char r='y', p='x';
+        // 단순 파서
+        char *s = lineBuf + 5;
+        // 기본값
+        int newROLL = ROLL_AXIS, newPITCH = PITCH_AXIS;
+        char *rp = strstr(s, "roll:");
+        char *pp = strstr(s, "pitch:");
+        if (rp && *(rp+5)) {
+          r = (char)tolower(*(rp+5));
+          if (r=='x') newROLL=0; else if (r=='y') newROLL=1; else if (r=='z') newROLL=2;
+        }
+        if (pp && *(pp+6)) {
+          p = (char)tolower(*(pp+6));
+          if (p=='x') newPITCH=0; else if (p=='y') newPITCH=1; else if (p=='z') newPITCH=2;
+        }
+        ROLL_AXIS = newROLL; PITCH_AXIS = newPITCH;
+        Serial.print(F("# axis set: roll="));
+        Serial.print(ROLL_AXIS==0?"x":(ROLL_AXIS==1?"y":"z"));
+        Serial.print(F(", pitch="));
+        Serial.println(PITCH_AXIS==0?"x":(PITCH_AXIS==1?"y":"z"));
       } else {
-        // 기타 명령 로깅
-        Serial.print(F("# unknown cmd: "));
-        Serial.println(lineBuf);
+        Serial.print(F("# unknown cmd: ")); Serial.println(lineBuf);
       }
     } else {
-      if (idx < sizeof(lineBuf) - 1) {
-        lineBuf[idx++] = c;
-      } else {
-        // 오버플로 시 리셋
-        idx = 0;
-      }
+      if (idx < sizeof(lineBuf) - 1) lineBuf[idx++] = c;
+      else idx = 0;
     }
   }
 }
 
-<<<<<<< HEAD
-void printCsvRow(unsigned long ts, float pitch, float roll, float yaw, const int flex[5]) {
-=======
-void printCsvRow(unsigned long ts, float pitch, float roll, float yaw, float ax, float ay, float az, const int flex[5]) {
->>>>>>> 0d2af155f806d0e736fc8855001b1a1be94db679
-  // 한 줄 CSV 출력
-  Serial.print(ts);
-  Serial.print(',');
-
-  Serial.print(pitch, 2);
-  Serial.print(',');
-  Serial.print(roll, 2);
-  Serial.print(',');
-  Serial.print(yaw, 2);
-<<<<<<< HEAD
-=======
-  Serial.print(',');
-  
-  Serial.print(ax, 3);  // 가속도 3자리 정밀도
-  Serial.print(',');
-  Serial.print(ay, 3);
-  Serial.print(',');
-  Serial.print(az, 3);
->>>>>>> 0d2af155f806d0e736fc8855001b1a1be94db679
-
-  for (int i = 0; i < 5; i++) {
-    Serial.print(',');
-    Serial.print(flex[i]);
-  }
-  Serial.println();
-}
-
-// -------------------- 표준 스케치 --------------------
+// ==================== 표준 스케치 ====================
 void setup() {
   Serial.begin(115200);
-  // 시리얼 준비 대기 (상황에 따라 타임아웃 없이 무한대기)
   unsigned long t0 = millis();
-  while (!Serial) {
-    if (millis() - t0 > 3000) break; // 3초 후 포기 (원하면 삭제)
-  }
+  while (!Serial) { if (millis() - t0 > 3000) break; }
 
-  // IMU 초기화
   if (!IMU.begin()) {
-    // Serial이 연결 안됐더라도 에러 문구는 일단 출력 시도
     Serial.println(F("Failed to initialize IMU."));
     while (1);
   }
+  calibrateGyroBias();
 
-  // 연결 상태 초기화
   connected = (bool)Serial;
+  if (connected) { clearSerialBuffers(); sendCsvHeader(); }
 
-  // 연결되어 있다면 헤더 송신
-  if (connected) {
-    clearSerialBuffers();  // 시작 시 버퍼 정리
-    sendCsvHeader();
-  }
-
-  lastSampleUs = micros();
+  lastTickUs = micros();
 }
 
 void loop() {
-  // 1) 연결 상태 감지 및 전이 처리
+  // 1) 연결 상태 전이
   bool nowConn = (bool)Serial;
-  if (nowConn && !connected) {
-    // 재연결됨 → 버퍼 정리 + 헤더 재전송
-    connected = true;
-    clearSerialBuffers();
-    sendCsvHeader();
-  } else if (!nowConn && connected) {
-    // 끊김 → 버퍼 정리, 전송 중단
-    connected = false;
-    clearSerialBuffers();
-  }
+  if (nowConn && !connected) { connected = true; clearSerialBuffers(); sendCsvHeader(); }
+  else if (!nowConn && connected) { connected = false; clearSerialBuffers(); }
 
-  // 2) 들어오는 커맨드 처리
-  if (connected) {
-    handleIncomingCommand();
-  }
+  // 2) 명령 처리
+  if (connected) handleIncomingCommand();
 
-  // 3) 주기적 샘플링 (연결되었을 때만 송신)
+  // 3) 주기 샘플링 & 필터
   unsigned long nowUs = micros();
-  unsigned long intervalUs = sampleIntervalMs * 1000UL;
+  unsigned long dueUs = (unsigned long)(sampleIntervalMs * 1000UL);
+  if (!connected || (nowUs - lastTickUs) < dueUs) return;
 
-  if (connected && (nowUs - lastSampleUs >= intervalUs)) {
-    lastSampleUs += intervalUs;  // 누적 방식으로 드리프트 감소
+  float dt = (nowUs - lastTickUs) * 1e-6f; // 실제 경과시간
+  lastTickUs = nowUs;
 
-<<<<<<< HEAD
-    // IMU 자이로 읽기
-    float gx = 0, gy = 0, gz = 0;
-    // 가용한지 체크 후 읽기 (가용하지 않으면 이전값 유지 or 0)
-=======
-    // IMU 자이로스코프 읽기
-    float gx = 0, gy = 0, gz = 0;
->>>>>>> 0d2af155f806d0e736fc8855001b1a1be94db679
-    if (IMU.gyroscopeAvailable()) {
-      IMU.readGyroscope(gx, gy, gz);
+  // 센서 읽기(읽기 실패 시 마지막 유효값 재사용)
+  float gx=last_gx, gy=last_gy, gz=last_gz, ax=last_ax, ay=last_ay, az=last_az;
+
+  bool g_ok=false, a_ok=false;
+  if (IMU.gyroscopeAvailable()) {
+    float tx, ty, tz;
+    if (IMU.readGyroscope(tx, ty, tz)) {
+      gx = tx; gy = ty; gz = tz; g_ok = true;
     }
-
-<<<<<<< HEAD
-    // 필요에 따라 축 매핑/부호 조정 가능
-    float pitch = gy;
-    float roll  = gx;
-    float yaw   = gz;
-=======
-    // IMU 가속도계 읽기
-    float ax = 0, ay = 0, az = 0;
-    if (IMU.accelerationAvailable()) {
-      IMU.readAcceleration(ax, ay, az);
-    }
-
-    // 축 매핑 (필요에 따라 조정)
-    float pitch = gy;  // Y축 자이로 → Pitch
-    float roll  = gx;  // X축 자이로 → Roll
-    float yaw   = gz;  // Z축 자이로 → Yaw
->>>>>>> 0d2af155f806d0e736fc8855001b1a1be94db679
-
-    // 플렉스 센서 ADC 읽기
-    int flex[5];
-    for (int i = 0; i < 5; i++) {
-      flex[i] = analogRead(FLEX_PINS[i]); // 0~1023
-    }
-
-<<<<<<< HEAD
-    // CSV 출력
-    unsigned long tsMs = millis();
-    printCsvRow(tsMs, pitch, roll, yaw, flex);
-=======
-    // CSV 출력 (타임스탬프, 방향, 가속도, 플렉스)
-    unsigned long tsMs = millis();
-    printCsvRow(tsMs, pitch, roll, yaw, ax, ay, az, flex);
->>>>>>> 0d2af155f806d0e736fc8855001b1a1be94db679
   }
+  if (IMU.accelerationAvailable()) {
+    float tx, ty, tz;
+    if (IMU.readAcceleration(tx, ty, tz)) {
+      ax = tx; ay = ty; az = tz; a_ok = true;
+    }
+  }
+  if (g_ok) { last_gx = gx; last_gy = gy; last_gz = gz; }
+  if (a_ok) { last_ax = ax; last_ay = ay; last_az = az; }
+
+  // 축/부호 보정
+  gx *= GAIN_GX; gy *= GAIN_GY; gz *= GAIN_GZ;
+
+  // 가속도 기반 틸트각
+  float pitch_acc_deg, roll_acc_deg;
+  accelToAngles(ax, ay, az, pitch_acc_deg, roll_acc_deg);
+
+  // 선택 축: roll/pitch에 사용할 자이로 성분 & 바이어스
+  float g_roll  = pickAxis(ROLL_AXIS,  gx, gy, gz);
+  float g_pitch = pickAxis(PITCH_AXIS, gx, gy, gz);
+  float b_roll  = pickAxis(ROLL_AXIS,  bias_x, bias_y, bias_z);
+  float b_pitch = pickAxis(PITCH_AXIS, bias_x, bias_y, bias_z);
+
+  // 보완 필터 업데이트
+  roll_deg  = kAlpha * (roll_deg  + (g_roll  - b_roll ) * dt) + (1.0f - kAlpha) * roll_acc_deg;
+  pitch_deg = kAlpha * (pitch_deg + (g_pitch - b_pitch) * dt) + (1.0f - kAlpha) * pitch_acc_deg;
+  yaw_deg  += (gz - bias_z) * dt; // 절대 yaw 아님(자력계 없음)
+
+  // 플렉스
+  int flex[5];
+  for (int i = 0; i < 5; i++) flex[i] = analogRead(FLEX_PINS[i]);
+
+  // CSV 출력
+  unsigned long tsMs = millis();
+  printCsvRow(tsMs, pitch_deg, roll_deg, yaw_deg, ax, ay, az, flex);
 }
