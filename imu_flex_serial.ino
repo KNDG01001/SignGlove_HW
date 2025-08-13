@@ -21,7 +21,11 @@ void clearSerialBuffers() {
 }
 
 void sendCsvHeader() {
+<<<<<<< HEAD
   Serial.println(F("timestamp,pitch,roll,yaw,flex1,flex2,flex3,flex4,flex5"));
+=======
+  Serial.println(F("timestamp,pitch,roll,yaw,accel_x,accel_y,accel_z,flex1,flex2,flex3,flex4,flex5"));
+>>>>>>> 0d2af155f806d0e736fc8855001b1a1be94db679
 }
 
 void handleIncomingCommand() {
@@ -73,7 +77,11 @@ void handleIncomingCommand() {
   }
 }
 
+<<<<<<< HEAD
 void printCsvRow(unsigned long ts, float pitch, float roll, float yaw, const int flex[5]) {
+=======
+void printCsvRow(unsigned long ts, float pitch, float roll, float yaw, float ax, float ay, float az, const int flex[5]) {
+>>>>>>> 0d2af155f806d0e736fc8855001b1a1be94db679
   // 한 줄 CSV 출력
   Serial.print(ts);
   Serial.print(',');
@@ -83,6 +91,16 @@ void printCsvRow(unsigned long ts, float pitch, float roll, float yaw, const int
   Serial.print(roll, 2);
   Serial.print(',');
   Serial.print(yaw, 2);
+<<<<<<< HEAD
+=======
+  Serial.print(',');
+  
+  Serial.print(ax, 3);  // 가속도 3자리 정밀도
+  Serial.print(',');
+  Serial.print(ay, 3);
+  Serial.print(',');
+  Serial.print(az, 3);
+>>>>>>> 0d2af155f806d0e736fc8855001b1a1be94db679
 
   for (int i = 0; i < 5; i++) {
     Serial.print(',');
@@ -145,17 +163,35 @@ void loop() {
   if (connected && (nowUs - lastSampleUs >= intervalUs)) {
     lastSampleUs += intervalUs;  // 누적 방식으로 드리프트 감소
 
+<<<<<<< HEAD
     // IMU 자이로 읽기
     float gx = 0, gy = 0, gz = 0;
     // 가용한지 체크 후 읽기 (가용하지 않으면 이전값 유지 or 0)
+=======
+    // IMU 자이로스코프 읽기
+    float gx = 0, gy = 0, gz = 0;
+>>>>>>> 0d2af155f806d0e736fc8855001b1a1be94db679
     if (IMU.gyroscopeAvailable()) {
       IMU.readGyroscope(gx, gy, gz);
     }
 
+<<<<<<< HEAD
     // 필요에 따라 축 매핑/부호 조정 가능
     float pitch = gy;
     float roll  = gx;
     float yaw   = gz;
+=======
+    // IMU 가속도계 읽기
+    float ax = 0, ay = 0, az = 0;
+    if (IMU.accelerationAvailable()) {
+      IMU.readAcceleration(ax, ay, az);
+    }
+
+    // 축 매핑 (필요에 따라 조정)
+    float pitch = gy;  // Y축 자이로 → Pitch
+    float roll  = gx;  // X축 자이로 → Roll
+    float yaw   = gz;  // Z축 자이로 → Yaw
+>>>>>>> 0d2af155f806d0e736fc8855001b1a1be94db679
 
     // 플렉스 센서 ADC 읽기
     int flex[5];
@@ -163,8 +199,14 @@ void loop() {
       flex[i] = analogRead(FLEX_PINS[i]); // 0~1023
     }
 
+<<<<<<< HEAD
     // CSV 출력
     unsigned long tsMs = millis();
     printCsvRow(tsMs, pitch, roll, yaw, flex);
+=======
+    // CSV 출력 (타임스탬프, 방향, 가속도, 플렉스)
+    unsigned long tsMs = millis();
+    printCsvRow(tsMs, pitch, roll, yaw, ax, ay, az, flex);
+>>>>>>> 0d2af155f806d0e736fc8855001b1a1be94db679
   }
 }
