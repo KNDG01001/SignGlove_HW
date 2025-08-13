@@ -11,12 +11,12 @@
 - **플렉스 센서 5개** (A0, A1, A2, A3, A6 핀)
 - **USB 시리얼 통신** (115200 baud)
 
-## 📊 최신 기능 (2025.01.26 업데이트)
+## 📊 최신 기능 (2025.08.13 업데이트)
 
 ### ✨ 가속도 데이터 지원 추가
 - **12필드 CSV 형식**: `timestamp,pitch,roll,yaw,accel_x,accel_y,accel_z,flex1,flex2,flex3,flex4,flex5`
 - **IMU 6축 완전 활용**: 자이로스코프 + 가속도계
-- **실시간 Hz 측정**: 아두이노 타임스탬프 기반 정확한 주기 계산
+- **실시간 Hz 측정**: 아두이노 타임스탬프 기반 7정확한 주기 계산
 
 ### 🤟 통합 수어 데이터 수집기
 - **34개 한국어 수어 클래스** 지원 (자음14 + 모음10 + 숫자10)
@@ -181,7 +181,7 @@ timestamp(ms),pitch(°),roll(°),yaw(°),accel_x(g),accel_y(g),accel_z(g),flex1,
 
 ### H5 저장 (KLP-SignGlove 호환)
 ```python
-episode_20250126_153000_ㄱ.h5:
+episode_20250813_153000_ㄱ.h5:
 ├── sensor_data        # [N,8] 메인 센서 (flex5 + orientation3)
 ├── timestamps         # [N] PC 수신 타임스탬프
 ├── arduino_timestamps # [N] 아두이노 타임스탬프  
