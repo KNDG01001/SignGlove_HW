@@ -5,7 +5,7 @@ from datetime import datetime
 HOST = '0.0.0.0'
 PORT = 5000
 
-csv_filename = f"imu_madgwick_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+csv_filename = f"imu_wifi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 
 # 로그 출력 함수
 def debug_print(msg):

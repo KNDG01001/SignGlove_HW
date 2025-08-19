@@ -13,6 +13,8 @@
 
 ## 📊 최신 기능 (2025.01.26 업데이트)
 
+> **🚀 v2.0 주요 변화**: Madgwick AHRS → 보완 필터, 9필드 → 12필드, WiFi → UART 중심
+
 ### ✨ 가속도 데이터 지원 추가
 - **12필드 CSV 형식**: `timestamp,pitch,roll,yaw,accel_x,accel_y,accel_z,flex1,flex2,flex3,flex4,flex5`
 - **IMU 6축 완전 활용**: 자이로스코프 + 가속도계
@@ -164,7 +166,7 @@ Q: 종료
 SignGlove_HW/
 ├── 📱 imu_flex_serial.ino          # 아두이노 펌웨어 (가속도 지원)
 ├── 📊 csv_uart.py                  # 간단한 CSV 수집기
-├── 📊 csv_wifi.py                  # WiFi 데이터 수집기  
+├── 📊 csv_wifi.py                  # WiFi 데이터 수집기 (레거시)  
 ├── 🗂️ datasets/                    # 데이터셋 저장소
 │   ├── raw/                       # 원본 CSV
 │   ├── processed/                 # 전처리된 데이터
@@ -263,9 +265,14 @@ episode_20250126_153000_ㄱ.h5:
 
 ## 📚 관련 문서
 
+### 📖 주요 문서 (채팅 변경시 자동 업데이트)
 - [`integration/README_UNIFIED_COLLECTOR.md`](integration/README_UNIFIED_COLLECTOR.md) - 통합 수집기 상세 가이드
-- [`datasets/README.md`](datasets/README.md) - 데이터셋 구조 및 활용법
+- [`datasets/README.md`](datasets/README.md) - 데이터셋 구조 및 활용법  
 - [`EXPERIMENT_DESIGN.md`](EXPERIMENT_DESIGN.md) - 실험 설계 및 데이터 수집 프로토콜
+
+### 📋 관리 문서
+- [`CHANGELOG.md`](CHANGELOG.md) - 버전별 변경 이력 및 이전 vs 현재 비교
+- [`DOCS_MANAGEMENT.md`](DOCS_MANAGEMENT.md) - 문서 관리 체계 및 업데이트 규칙
 
 ---
 
