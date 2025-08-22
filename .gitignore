@@ -1,8 +1,8 @@
 # SignGlove_HW .gitignore
 
 # 데이터 파일들 (용량이 크므로 제외)
-*.csv
-*.h5
+#*.csv
+#*.h5
 *.hdf5
 *.npy
 *.npz
