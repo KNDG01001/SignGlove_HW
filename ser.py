@@ -97,6 +97,9 @@ class SignGloveUnifiedCollector:
             "4": "조금 손가락이 구부러짐",
             "5": "많이 손가락이 구부러짐",
         }
+        self.samples_per_episode = 80
+        self.episodes_per_type = 12
+        self.total_episodes_target = len(self.episode_types) * self.episodes_per_type
         self.current_episode_type = None
 
         # 상태 변수들
@@ -333,9 +336,9 @@ class SignGloveUnifiedCollector:
                         if self.collecting:
                             self.episode_data.append(reading)
                             if len(self.episode_data) % 20 == 0:
-                                print(f"📊 수집 중... {len(self.episode_data)}개 샘플 (현재: {sampling_hz:.1f}Hz)")
-                            if len(self.episode_data) >= 80:
-                                print(f"✅ {self.current_class} 클래스 300개 샘플 수집 완료. 에피소드를 종료하고 재시작합니다.")
+                                print(f"?? ?? ?... {len(self.episode_data)}? ?? (??: {sampling_hz:.1f}Hz)")
+                            if len(self.episode_data) >= self.samples_per_episode:
+                                print(f"? {self.current_class} ??? {self.samples_per_episode}? ?? ?? ??. ????? ???? ?? ?????.")
                                 self.stop_episode()
                                 self.start_episode(self.current_class)
 
@@ -403,7 +406,7 @@ class SignGloveUnifiedCollector:
         print(f"\n📊 '{class_name}' 클래스 에피소드 유형별 진행 상황:")
         for key, value in self.episode_types.items():
             count = self.collection_stats[class_name][key]
-            print(f"   {key}: {value} - {count}/5")
+            print(f"   {key}: {value} - {count}/{self.episodes_per_type}")
 
         # Select episode type
         print("\n🖐️ 에피소드 유형 선택:")
@@ -415,7 +418,7 @@ class SignGloveUnifiedCollector:
             print("🚫 에피소드 수집이 취소되었습니다.")
             return
         
-        if self.collection_stats[class_name][choice] >= 12:
+        if self.collection_stats[class_name][choice] >= self.episodes_per_type:
             print(f"⚠️ '{self.episode_types[choice]}' 유형은 이미 5번 수집 완료했습니다.")
             return
 
