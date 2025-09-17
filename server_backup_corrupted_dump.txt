@@ -1,0 +1,10 @@
+﻿
+
+        elif key == 'V':
+            out_path = self.save_progress_png(session_view=True)
+            if out_path is not None:
+                print(f'\\nSession progress PNG saved: {out_path}')
+            else:
+                print('Progress PNG save failed (matplotlib missing or error)')
+
+
