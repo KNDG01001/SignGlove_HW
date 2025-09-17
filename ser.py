@@ -31,6 +31,13 @@ AUTO_RECAL = False    # 연결 직후 자이로 바이어스 자동 보정(recal
 AUTO_YAWZERO = False  # 연결 직후 yawzero 자동 전송
 AUTO_ZERO = False     # 연결 직후 zero 자동 전송(출력 오프셋 0 기준)
 
+# 버퍼 디버그 옵션
+BUFFER_DEBUG = True   # True면 버퍼 스트림 디버그 정보를 주기적으로 출력
+BUFFER_DEBUG_INTERVAL = 1.0  # 버퍼 상태 출력 주기(초)
+BUFFER_DROP_LOG_INTERVAL = 50  # 데이터 드롭 경고 반복 간격
+BUFFER_WARNING_THRESHOLD = 0.8  # 버퍼 사용량 경고 임계값 (80%)
+BUFFER_CRITICAL_THRESHOLD = 0.95  # 버퍼 사용량 위험 임계값 (95%)
+
 # OS별 키보드 입력 모듈 임포트
 if sys.platform == 'win32':
     import msvcrt
@@ -71,6 +78,17 @@ class SignGloveUnifiedCollector:
 
     def __init__(self):
         print("🤟 SignGlove 통합 수어 데이터 수집기 초기화 중...")
+        
+        # 버퍼 모니터링 변수들
+        self.buffer_stats = {
+            'total_samples': 0,
+            'dropped_samples': 0,
+            'last_sample_time': None,
+            'max_queue_usage': 0,
+            'buffer_warnings': 0,
+            'last_buffer_check': time.time(),
+            'sample_rate_history': [],
+        }
 
         # 34개 한국어 수어 클래스 정의
         self.ksl_classes = {
@@ -130,6 +148,8 @@ class SignGloveUnifiedCollector:
         self.realtime_print_enabled = False
 
         self._prev_reading: Optional[SignGloveSensorReading] = None  # 델타 계산용
+        self._last_buffer_debug_ts: float = 0.0
+        self._dropped_samples: int = 0
 
         self.load_collection_progress()
         print("✅ SignGlove 통합 수집기 준비 완료!")
@@ -249,6 +269,63 @@ class SignGloveUnifiedCollector:
         self.serial_thread.start()
         print("📡 데이터 수신 스레드 시작됨")
 
+    def update_buffer_stats(self, sample_received=True, sample_dropped=False):
+        """버퍼 통계 정보를 업데이트합니다."""
+        now = time.time()
+        stats = self.buffer_stats
+        
+        if sample_received:
+            stats['total_samples'] += 1
+            if stats['last_sample_time']:
+                dt = now - stats['last_sample_time']
+                if dt > 0:
+                    current_rate = 1.0 / dt
+                    stats['sample_rate_history'].append(current_rate)
+                    if len(stats['sample_rate_history']) > 100:  # 최근 100개 샘플만 유지
+                        stats['sample_rate_history'] = stats['sample_rate_history'][-100:]
+            stats['last_sample_time'] = now
+
+        if sample_dropped:
+            stats['dropped_samples'] += 1
+
+        # 큐 사용량 모니터링
+        current_usage = self.data_queue.qsize() / self.data_queue.maxsize
+        stats['max_queue_usage'] = max(stats['max_queue_usage'], current_usage)
+
+        # 주기적인 버퍼 상태 체크 및 경고
+        if BUFFER_DEBUG and (now - stats['last_buffer_check'] >= BUFFER_DEBUG_INTERVAL):
+            self.print_buffer_debug_info()
+            stats['last_buffer_check'] = now
+
+    def print_buffer_debug_info(self):
+        """현재 버퍼 상태 정보를 출력합니다."""
+        stats = self.buffer_stats
+        current_usage = self.data_queue.qsize() / self.data_queue.maxsize
+        avg_rate = sum(stats['sample_rate_history']) / len(stats['sample_rate_history']) if stats['sample_rate_history'] else 0
+
+        # 버퍼 상태에 따른 이모지 선택
+        if current_usage >= BUFFER_CRITICAL_THRESHOLD:
+            status_emoji = "🔴"  # 위험
+        elif current_usage >= BUFFER_WARNING_THRESHOLD:
+            status_emoji = "🟡"  # 경고
+        else:
+            status_emoji = "🟢"  # 정상
+
+        print(
+            f"\n{status_emoji} [버퍼 상태]"
+            f"\n   큐 사용량: {self.data_queue.qsize()}/{self.data_queue.maxsize} ({current_usage*100:.1f}%)"
+            f"\n   최대 사용량: {stats['max_queue_usage']*100:.1f}%"
+            f"\n   총 수신 샘플: {stats['total_samples']:,}개"
+            f"\n   손실 샘플: {stats['dropped_samples']:,}개"
+            f"\n   손실률: {(stats['dropped_samples']/max(1,stats['total_samples'])*100):.2f}%"
+            f"\n   평균 샘플링 속도: {avg_rate:.1f} Hz"
+        )
+
+        if current_usage >= BUFFER_CRITICAL_THRESHOLD:
+            print("⚠️ 경고: 버퍼가 거의 가득 찼습니다! 데이터 손실 위험이 높습니다.")
+        elif current_usage >= BUFFER_WARNING_THRESHOLD:
+            print("⚠️ 주의: 버퍼 사용량이 높습니다.")
+
     def _data_reception_worker(self):
         last_arduino_ms = None
         self._prev_reading = None
@@ -331,6 +408,16 @@ class SignGloveUnifiedCollector:
                         # 큐로 전달
                         if not self.data_queue.full():
                             self.data_queue.put(reading)
+                            self.update_buffer_stats(sample_received=True)
+                            if self._dropped_samples:
+                                if BUFFER_DEBUG:
+                                    print(f"🐛 [BUFFER] 큐 정상화 - 누락된 샘플 {self._dropped_samples}개")
+                                self._dropped_samples = 0
+                        else:
+                            self._dropped_samples += 1
+                            self.update_buffer_stats(sample_received=True, sample_dropped=True)
+                            if BUFFER_DEBUG and (self._dropped_samples == 1 or self._dropped_samples % BUFFER_DROP_LOG_INTERVAL == 0):
+                                print(f"⚠️ [BUFFER] 데이터 큐 포화 - 누락 누적 {self._dropped_samples}개")
 
                         # 에피소드 수집 중이면 적재
                         if self.collecting:
@@ -344,6 +431,22 @@ class SignGloveUnifiedCollector:
 
                     except (ValueError, IndexError) as e:
                         print(f"⚠️ 데이터 파싱 오류: {line} → {e}")
+
+                if BUFFER_DEBUG:
+                    now = time.time()
+                    if now - self._last_buffer_debug_ts >= BUFFER_DEBUG_INTERVAL:
+                        in_waiting = 0
+                        if self.serial_port and self.serial_port.is_open:
+                            try:
+                                in_waiting = self.serial_port.in_waiting
+                            except Exception:
+                                in_waiting = -1
+                        print(
+                            f"🐛 [BUFFER] in_waiting={in_waiting} bytes | "
+                            f"queue={self.data_queue.qsize()}/{self.data_queue.maxsize} | "
+                            f"collecting={self.collecting}"
+                        )
+                        self._last_buffer_debug_ts = now
 
                 time.sleep(0.001)
 
@@ -559,6 +662,72 @@ class SignGloveUnifiedCollector:
         return save_path
 
     # ------------------- 자세 기준/검증 -------------------
+    def show_current_progress(self):
+        """현재까지의 전체 진행상황을 상세히 보여줍니다."""
+        print("\n📊 SignGlove 데이터 수집 진행상황")
+        print("=" * 80)
+
+        # 전체 통계 계산
+        total_collected = 0
+        total_target = len(self.all_classes) * len(self.episode_types) * self.episodes_per_type
+        
+        # 카테고리별 진행상황
+        categories = {
+            "자음": self.ksl_classes["consonants"],
+            "모음": self.ksl_classes["vowels"],
+            "숫자": self.ksl_classes["numbers"]
+        }
+
+        for category_name, class_list in categories.items():
+            print(f"\n[{category_name}]")
+            category_collected = 0
+            category_target = len(class_list) * len(self.episode_types) * self.episodes_per_type
+            
+            for class_name in class_list:
+                collected = sum(self.collection_stats[class_name].values())
+                total_collected += collected
+                category_collected += collected
+                
+                # 에피소드 유형별 상세 현황
+                type_details = []
+                for episode_type in self.episode_types.keys():
+                    count = self.collection_stats[class_name][episode_type]
+                    target = self.episodes_per_type
+                    if count > 0:
+                        type_details.append(f"{episode_type}: {count}/{target}")
+                
+                # 진행률 계산 및 진행바 생성
+                target = len(self.episode_types) * self.episodes_per_type
+                progress = (collected / target * 100) if target > 0 else 0
+                progress_bar = self.create_progress_bar(collected, target, width=20)
+                
+                # 클래스별 진행상황 출력
+                status = "✅" if collected >= target else "⏳"
+                print(f"{status} {class_name}: {progress_bar} {collected}/{target} ({progress:.1f}%)")
+                if type_details:
+                    print(f"   └─ 유형별: {', '.join(type_details)}")
+            
+            # 카테고리 전체 진행률
+            category_progress = (category_collected / category_target * 100) if category_target > 0 else 0
+            category_bar = self.create_progress_bar(category_collected, category_target, width=30)
+            print(f"\n📈 {category_name} 전체: {category_bar}")
+            print(f"   {category_collected}/{category_target} ({category_progress:.1f}%)")
+
+        # 전체 진행률
+        print("\n" + "=" * 80)
+        overall_progress = (total_collected / total_target * 100) if total_target > 0 else 0
+        overall_bar = self.create_progress_bar(total_collected, total_target, width=40)
+        print(f"🎯 전체 진행률: {overall_bar}")
+        print(f"   총 {total_collected}/{total_target} 에피소드 완료 ({overall_progress:.1f}%)")
+        
+        # 남은 수집 수
+        remaining = total_target - total_collected
+        if remaining > 0:
+            print(f"⏳ 앞으로 {remaining}개의 에피소드를 더 수집해야 합니다.")
+        else:
+            print("🎉 모든 데이터 수집이 완료되었습니다!")
+        print("=" * 80 + "\n")
+
     def get_class_category(self, class_name: str) -> str:
         if class_name in self.ksl_classes["consonants"]:
             return "consonant"
@@ -622,20 +791,54 @@ class SignGloveUnifiedCollector:
 
     # ------------------- 진행상황 저장/로드/리셋 -------------------
     def load_collection_progress(self):
+        """진행상황 파일(JSON)과 실제 디렉토리의 파일들을 스캔하여 실제 데이터 기준으로 진행상황을 동기화합니다."""
         try:
+            # 1. 우선 progress.json 파일 로드 시도
             if self.progress_file.exists():
                 with open(self.progress_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    # Handle nested defaultdict
                     self.collection_stats = defaultdict(lambda: defaultdict(int))
                     for class_name, episode_stats in data.get('collection_stats', {}).items():
                         self.collection_stats[class_name] = defaultdict(int, episode_stats)
-                print("📊 수집 진행상황 로드 완료")
+                print("📊 기존 진행상황 파일 로드됨")
             else:
                 self.collection_stats = defaultdict(lambda: defaultdict(int))
-                print("📊 새로운 수집 진행상황 시작")
+                print("📊 새로운 진행상황 시작")
+
+            # 2. 실제 디렉토리 스캔하여 파일 수 기준으로 진행상황 동기화
+            print("🔍 실제 데이터 파일 스캔 중...")
+            real_stats = defaultdict(lambda: defaultdict(int))
+            total_files = 0
+
+            for class_name in self.all_classes:
+                class_dir = self.data_dir / class_name
+                if not class_dir.exists():
+                    continue
+                
+                for episode_type in self.episode_types.keys():
+                    type_dir = class_dir / episode_type
+                    if not type_dir.exists():
+                        continue
+                    
+                    # H5와 CSV 파일 수 중 더 큰 값 사용 (일부만 저장된 경우 대비)
+                    h5_count = len(list(type_dir.glob("*.h5")))
+                    csv_count = len(list(type_dir.glob("*.csv")))
+                    real_count = max(h5_count, csv_count)
+                    
+                    if real_count > 0:
+                        real_stats[class_name][episode_type] = real_count
+                        total_files += real_count
+
+            # 3. 실제 파일 수와 JSON의 통계가 다르면 실제 값으로 동기화
+            if real_stats != self.collection_stats:
+                print("⚠️ 진행상황 불일치 감지됨 - 실제 파일 기준으로 동기화합니다")
+                self.collection_stats = real_stats
+                self.save_collection_progress()  # 동기화된 상태 저장
+            
+            print(f"✅ 진행상황 동기화 완료 (총 {total_files}개 파일 확인됨)")
+
         except Exception as e:
-            print(f"⚠️ 진행상황 로드 실패: {e}")
+            print(f"⚠️ 진행상황 로드/동기화 실패: {e}")
             self.collection_stats = defaultdict(lambda: defaultdict(int))
 
     def save_collection_progress(self):
@@ -767,10 +970,13 @@ class SignGloveUnifiedCollector:
         elif key == 'd':
             self.reset_all_progress()
 
+        elif key == 'p':
+            self.show_current_progress()
+
         else:
             if not self.class_selection_mode:
                 print(f"⚠️ 알 수 없는 키: {key.upper()}")
-                print("💡 도움말: C(연결), N(새수집), M(종료), Q(종료)")
+                print("💡 도움말: C(연결), N(새수집), M(종료), P(진행상황), Q(종료)")
 
     # ------------------- 메인 루프 -------------------
     def run(self):
