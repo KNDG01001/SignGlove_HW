@@ -31,12 +31,19 @@ AUTO_RECAL = False    # 연결 직후 자이로 바이어스 자동 보정(recal
 AUTO_YAWZERO = False  # 연결 직후 yawzero 자동 전송
 AUTO_ZERO = False     # 연결 직후 zero 자동 전송(출력 오프셋 0 기준)
 
+# 샘플링 레이트 제어
+TARGET_SAMPLING_RATE = 33.3  # 목표 샘플링 레이트 (Hz)
+SAMPLING_RATE_TOLERANCE = 0.2  # 허용 오차 (±0.2Hz)
+RATE_CONTROL_INTERVAL = 0.1   # 레이트 제어 주기 (초)
+MIN_SLEEP_TIME = 0.001  # 최소 대기 시간 (초)
+
 # 버퍼 디버그 옵션
 BUFFER_DEBUG = True   # True면 버퍼 스트림 디버그 정보를 주기적으로 출력
 BUFFER_DEBUG_INTERVAL = 1.0  # 버퍼 상태 출력 주기(초)
 BUFFER_DROP_LOG_INTERVAL = 50  # 데이터 드롭 경고 반복 간격
 BUFFER_WARNING_THRESHOLD = 0.8  # 버퍼 사용량 경고 임계값 (80%)
 BUFFER_CRITICAL_THRESHOLD = 0.95  # 버퍼 사용량 위험 임계값 (95%)
+MAX_QUEUE_SIZE = 100  # 데이터 큐 최대 크기 (이전의 1000에서 축소)
 
 # OS별 키보드 입력 모듈 임포트
 if sys.platform == 'win32':
@@ -88,6 +95,8 @@ class SignGloveUnifiedCollector:
             'buffer_warnings': 0,
             'last_buffer_check': time.time(),
             'sample_rate_history': [],
+            'last_rate_control': time.time(),
+            'current_sleep_time': MIN_SLEEP_TIME,
         }
 
         # 34개 한국어 수어 클래스 정의
@@ -269,6 +278,34 @@ class SignGloveUnifiedCollector:
         self.serial_thread.start()
         print("📡 데이터 수신 스레드 시작됨")
 
+    def adjust_sampling_rate(self):
+        """현재 샘플링 레이트를 체크하고 필요한 경우 조정합니다."""
+        now = time.time()
+        stats = self.buffer_stats
+        
+        # 주기적으로만 레이트 조정
+        if now - stats['last_rate_control'] < RATE_CONTROL_INTERVAL:
+            return
+            
+        # 현재 샘플링 레이트 계산
+        if stats['sample_rate_history']:
+            current_rate = sum(stats['sample_rate_history'][-10:]) / min(10, len(stats['sample_rate_history']))
+            
+            # 목표 레이트와의 차이 계산
+            rate_diff = current_rate - TARGET_SAMPLING_RATE
+            
+            # 허용 범위를 벗어났다면 sleep 시간 조정
+            if abs(rate_diff) > SAMPLING_RATE_TOLERANCE:
+                if rate_diff > 0:  # 너무 빠름
+                    stats['current_sleep_time'] = min(0.1, stats['current_sleep_time'] * 1.1)
+                else:  # 너무 느림
+                    stats['current_sleep_time'] = max(MIN_SLEEP_TIME, stats['current_sleep_time'] * 0.9)
+                
+            if BUFFER_DEBUG:
+                print(f"⚡ 샘플링 레이트: {current_rate:.1f}Hz (목표: {TARGET_SAMPLING_RATE}Hz, 대기: {stats['current_sleep_time']*1000:.2f}ms)")
+                
+        stats['last_rate_control'] = now
+
     def update_buffer_stats(self, sample_received=True, sample_dropped=False):
         """버퍼 통계 정보를 업데이트합니다."""
         now = time.time()
@@ -448,7 +485,9 @@ class SignGloveUnifiedCollector:
                         )
                         self._last_buffer_debug_ts = now
 
-                time.sleep(0.001)
+                # 샘플링 레이트 제어를 위한 동적 대기
+                self.adjust_sampling_rate()
+                time.sleep(self.buffer_stats['current_sleep_time'])
 
             except Exception as e:
                 print(f"❌ 데이터 수신 오류: {e}")
