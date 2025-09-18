@@ -42,11 +42,12 @@ def load_series(root: Path) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
         ts_raw = row.get("timestamp_ms")
         if ts_raw:
             try:
-                timestamps.append(float(ts_raw))
+                ts_val = float(ts_raw)
+                timestamps.append(ts_val)
             except ValueError:
-                timestamps.append(float(len(timestamps)))
+                continue  # 잘못된 타임스탬프는 건너뜀
         else:
-            timestamps.append(float(len(timestamps)))
+            continue  # 타임스탬프 없는 행은 건너뜀
 
         for col in FLEX_COLS:
             val = row.get(col, "")
@@ -103,11 +104,19 @@ def plot_flex(
     """Create time-series and boxplot figure."""
     fig, axes = plt.subplots(2, 1, figsize=(12, 7), constrained_layout=True)
 
+    # 타임스탬프를 0초부터 시작하도록 정규화
+    if len(timestamps) > 0:
+        t_start = timestamps[0]
+        t_seconds = (timestamps - t_start) / 1000.0  # ms를 초로 변환
+    else:
+        t_seconds = np.array([])
+
     for col in FLEX_COLS:
-        axes[0].plot(timestamps, series[col], linewidth=0.8, label=col)
+        axes[0].plot(t_seconds, series[col], linewidth=0.8, label=col)
     axes[0].set_title("Flex Sensor Time Series")
-    axes[0].set_xlabel("timestamp_ms (raw order if missing)")
-    axes[0].set_ylabel("value")
+    axes[0].set_xlabel("Time (seconds)")
+    axes[0].set_ylabel("Flex Sensor Value")
+    axes[0].grid(True, linestyle='--', alpha=0.7)
     axes[0].legend(loc="upper right")
 
     clean = [full_series[col][~np.isnan(full_series[col])] for col in FLEX_COLS]
