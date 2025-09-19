@@ -111,9 +111,9 @@ class SignGloveUnifiedCollector:
         for category in self.ksl_classes.values():
             self.all_classes.extend(category)
 
-        # 수집 목표
+        # 수집 목표 (60회 * 5유형 = 300회)
         self.collection_targets = {
-            class_name: {"target": 960, "description": f"'{class_name}'"} for class_name in self.all_classes
+            class_name: {"target": 300, "description": f"'{class_name}'"} for class_name in self.all_classes
         }
 
         # 에피소드 유형
@@ -124,13 +124,14 @@ class SignGloveUnifiedCollector:
             "4": "조금 손가락이 구부러짐",
             "5": "많이 손가락이 구부러짐",
         }
-        self.samples_per_episode = 80
-        self.episodes_per_type = 12
-        self.total_episodes_target = len(self.episode_types) * self.episodes_per_type
+        self.samples_per_episode = 80  # 각 에피소드당 샘플 수 (2.4초 = 80 samples @33.3Hz)
+        self.episodes_per_type = 60   # 각 유형당 60번 수집
+        self.total_episodes_target = len(self.episode_types) * self.episodes_per_type  # 총 300번 (60회 * 5가지 유형)
         self.current_episode_type = None
 
         # 상태 변수들
         self.collecting = False
+        self.auto_collecting = False
         self.current_class = None
         self.episode_data: List[SignGloveSensorReading] = []
         self.episode_start_time = None
@@ -366,6 +367,7 @@ class SignGloveUnifiedCollector:
     def _data_reception_worker(self):
         last_arduino_ms = None
         self._prev_reading = None
+        collection_start_time = None
 
         while not self.stop_event.is_set():
             try:
@@ -401,8 +403,17 @@ class SignGloveUnifiedCollector:
                             sampling_hz = 1000.0 / dt_ms
                         last_arduino_ms = arduino_ts
 
+                        # 수집 시작 시점 기준 상대 시간으로 변환
+                        if self.collecting:
+                            if collection_start_time is None:
+                                collection_start_time = arduino_ts
+                            relative_ts = arduino_ts - collection_start_time
+                        else:
+                            relative_ts = arduino_ts
+                            collection_start_time = None
+
                         reading = SignGloveSensorReading(
-                            timestamp_ms=arduino_ts,
+                            timestamp_ms=relative_ts,
                             recv_timestamp_ms=recv_time_ms,
                             pitch=float(parts[1]),
                             roll=float(parts[2]),
@@ -494,6 +505,41 @@ class SignGloveUnifiedCollector:
                 break
 
     # ------------------- UI: 클래스 선택/진행 표시 -------------------
+    def start_auto_collection(self, class_name: str):
+        """선택한 클래스의 모든 남은 유형을 자동으로 수집합니다."""
+        self.auto_collecting = True
+        
+        try:
+            while True:
+                # 남은 유형 확인
+                remaining_types = []
+                for key, value in self.episode_types.items():
+                    count = self.collection_stats[class_name][key]
+                    if count < self.episodes_per_type:
+                        remaining_types.append(key)
+
+                if not remaining_types:
+                    print(f"\n✅ '{class_name}' 클래스의 모든 유형 수집이 완료되었습니다!")
+                    break
+
+                # 다음 유형 수집 시작
+                next_type = remaining_types[0]
+                print(f"\n⏳ '{class_name}' - '{self.episode_types[next_type]}' 유형 수집 시작...")
+                print(f"남은 유형: {len(remaining_types)}개")
+                print("(수집을 중단하려면 'Q' 키를 누르세요)")
+
+                self.start_episode(class_name, auto_collect=True)
+                
+                # 자동 수집 중단 확인
+                if not self.auto_collecting:
+                    print("\n🛑 자동 수집이 중단되었습니다.")
+                    break
+
+        except KeyboardInterrupt:
+            print("\n🛑 자동 수집이 중단되었습니다.")
+        finally:
+            self.auto_collecting = False
+
     def show_class_selection(self):
         self.class_selection_mode = True
         print("\n🎯 한국어 수어 클래스 선택")
@@ -536,7 +582,7 @@ class SignGloveUnifiedCollector:
         return "█" * filled + "░" * (width - filled)
 
     # ------------------- 에피소드 수집/저장 -------------------
-    def start_episode(self, class_name: str):
+    def start_episode(self, class_name: str, auto_collect: bool = False):
         if self.collecting:
             self.stop_episode()
 
@@ -546,23 +592,43 @@ class SignGloveUnifiedCollector:
 
         # Show progress for each episode type
         print(f"\n📊 '{class_name}' 클래스 에피소드 유형별 진행 상황:")
+        remaining_types = []
         for key, value in self.episode_types.items():
             count = self.collection_stats[class_name][key]
             print(f"   {key}: {value} - {count}/{self.episodes_per_type}")
+            if count < self.episodes_per_type:
+                remaining_types.append(key)
 
-        # Select episode type
-        print("\n🖐️ 에피소드 유형 선택:")
-        for key, value in self.episode_types.items():
-            print(f"   {key}: {value}")
-        
-        choice = input("✨ 1-5번 중 원하는 에피소드 유형을 선택하고 Enter를 누르세요 (취소: Enter): ")
-        if choice not in self.episode_types:
-            print("🚫 에피소드 수집이 취소되었습니다.")
+        if not remaining_types:
+            print(f"✅ '{class_name}' 클래스의 모든 유형이 수집 완료되었습니다!")
             return
-        
-        if self.collection_stats[class_name][choice] >= self.episodes_per_type:
-            print(f"⚠️ '{self.episode_types[choice]}' 유형은 이미 5번 수집 완료했습니다.")
-            return
+
+        if auto_collect:
+            if not remaining_types:
+                print(f"✅ '{class_name}' 모든 유형 수집 완료!")
+                return
+            choice = remaining_types[0]
+            print(f"\n🤖 자동 수집: '{self.episode_types[choice]}' 유형 시작")
+        else:
+            # Select episode type
+            print("\n🖐️ 에피소드 유형 선택:")
+            for key in remaining_types:
+                print(f"   {key}: {self.episode_types[key]}")
+            print("   A: 모든 남은 유형 자동 수집")
+            
+            choice = input("✨ 유형 번호를 선택하거나 'A'를 입력하세요 (취소: Enter): ").upper()
+            if not choice:
+                print("🚫 에피소드 수집이 취소되었습니다.")
+                return
+            
+            if choice == 'A':
+                print("\n🤖 자동 수집 모드를 시작합니다...")
+                self.start_auto_collection(class_name)
+                return
+            
+            if choice not in self.episode_types:
+                print("🚫 잘못된 유형입니다.")
+                return
 
         self.current_episode_type = choice
         self.current_class = class_name
