@@ -31,12 +31,20 @@ AUTO_RECAL = False    # 연결 직후 자이로 바이어스 자동 보정(recal
 AUTO_YAWZERO = False  # 연결 직후 yawzero 자동 전송
 AUTO_ZERO = False     # 연결 직후 zero 자동 전송(출력 오프셋 0 기준)
 
+# 샘플링 레이트 제어
+TARGET_SAMPLING_RATE = 33.0  # 목표 샘플링 레이트 (Hz)
+SAMPLING_RATE_TOLERANCE = 0.1  # 허용 오차 (±0.1Hz)
+RATE_CONTROL_INTERVAL = 0.05   # 레이트 제어 주기 (초)
+MIN_SLEEP_TIME = 0.001  # 최소 대기 시간 (초)
+FIXED_SLEEP_TIME = 1.0 / TARGET_SAMPLING_RATE  # 고정 대기 시간
+
 # 버퍼 디버그 옵션
 BUFFER_DEBUG = True   # True면 버퍼 스트림 디버그 정보를 주기적으로 출력
 BUFFER_DEBUG_INTERVAL = 1.0  # 버퍼 상태 출력 주기(초)
 BUFFER_DROP_LOG_INTERVAL = 50  # 데이터 드롭 경고 반복 간격
 BUFFER_WARNING_THRESHOLD = 0.8  # 버퍼 사용량 경고 임계값 (80%)
 BUFFER_CRITICAL_THRESHOLD = 0.95  # 버퍼 사용량 위험 임계값 (95%)
+MAX_QUEUE_SIZE = 100  # 데이터 큐 최대 크기 (이전의 1000에서 축소)
 
 # OS별 키보드 입력 모듈 임포트
 if sys.platform == 'win32':
@@ -79,6 +87,9 @@ class SignGloveUnifiedCollector:
     def __init__(self):
         print("🤟 SignGlove 통합 수어 데이터 수집기 초기화 중...")
         
+        # 버퍼 활성화 상태
+        self.buffer_active = False
+
         # 버퍼 모니터링 변수들
         self.buffer_stats = {
             'total_samples': 0,
@@ -88,6 +99,8 @@ class SignGloveUnifiedCollector:
             'buffer_warnings': 0,
             'last_buffer_check': time.time(),
             'sample_rate_history': [],
+            'last_rate_control': time.time(),
+            'current_sleep_time': MIN_SLEEP_TIME,
         }
 
         # 34개 한국어 수어 클래스 정의
@@ -102,9 +115,9 @@ class SignGloveUnifiedCollector:
         for category in self.ksl_classes.values():
             self.all_classes.extend(category)
 
-        # 수집 목표
+        # 수집 목표 (5유형 * 60회 = 300회)
         self.collection_targets = {
-            class_name: {"target": 960, "description": f"'{class_name}'"} for class_name in self.all_classes
+            class_name: {"target": 300, "description": f"'{class_name}'"} for class_name in self.all_classes
         }
 
         # 에피소드 유형
@@ -115,13 +128,14 @@ class SignGloveUnifiedCollector:
             "4": "조금 손가락이 구부러짐",
             "5": "많이 손가락이 구부러짐",
         }
-        self.samples_per_episode = 80
-        self.episodes_per_type = 12
-        self.total_episodes_target = len(self.episode_types) * self.episodes_per_type
+        self.samples_per_episode = 80  # 각 에피소드당 샘플 수 (2.4초 = 80 samples @33.3Hz)
+        self.episodes_per_type = 60   # 각 유형당 60번 수집 (이전 12번에서 증가)
+        self.total_episodes_target = len(self.episode_types) * self.episodes_per_type  # 총 300번 (60회 * 5가지 유형)
         self.current_episode_type = None
 
         # 상태 변수들
         self.collecting = False
+        self.auto_collecting = False
         self.current_class = None
         self.episode_data: List[SignGloveSensorReading] = []
         self.episode_start_time = None
@@ -269,8 +283,30 @@ class SignGloveUnifiedCollector:
         self.serial_thread.start()
         print("📡 데이터 수신 스레드 시작됨")
 
+    def adjust_sampling_rate(self):
+        """고정된 샘플링 레이트로 데이터 수집을 유지합니다."""
+        stats = self.buffer_stats
+        
+        if self.collecting:
+            # 고정된 샘플링 레이트 사용
+            stats['current_sleep_time'] = FIXED_SLEEP_TIME
+            
+            # 모니터링을 위한 통계 수집 (5초마다 한 번씩만)
+            now = time.time()
+            if now - stats['last_rate_control'] >= 5.0 and stats['sample_rate_history']:
+                current_rate = sum(stats['sample_rate_history'][-10:]) / min(10, len(stats['sample_rate_history']))
+                if BUFFER_DEBUG and abs(current_rate - TARGET_SAMPLING_RATE) > SAMPLING_RATE_TOLERANCE:
+                    print(f"\n⚠️ 샘플링 레이트 불안정: {current_rate:.1f}Hz")
+                stats['last_rate_control'] = now
+        else:
+            # 수집 중이 아닐 때는 더 긴 대기 시간 사용
+            stats['current_sleep_time'] = FIXED_SLEEP_TIME * 2
+
     def update_buffer_stats(self, sample_received=True, sample_dropped=False):
         """버퍼 통계 정보를 업데이트합니다."""
+        if not self.buffer_active or not self.collecting:  # 버퍼가 비활성화되어 있거나 수집 중이 아니면 무시
+            return
+            
         now = time.time()
         stats = self.buffer_stats
         
@@ -299,6 +335,9 @@ class SignGloveUnifiedCollector:
 
     def print_buffer_debug_info(self):
         """현재 버퍼 상태 정보를 출력합니다."""
+        if not self.buffer_active or not self.collecting:  # 버퍼가 비활성화되어 있거나 수집 중이 아니면 무시
+            return
+            
         stats = self.buffer_stats
         current_usage = self.data_queue.qsize() / self.data_queue.maxsize
         avg_rate = sum(stats['sample_rate_history']) / len(stats['sample_rate_history']) if stats['sample_rate_history'] else 0
@@ -311,24 +350,27 @@ class SignGloveUnifiedCollector:
         else:
             status_emoji = "🟢"  # 정상
 
-        print(
-            f"\n{status_emoji} [버퍼 상태]"
-            f"\n   큐 사용량: {self.data_queue.qsize()}/{self.data_queue.maxsize} ({current_usage*100:.1f}%)"
-            f"\n   최대 사용량: {stats['max_queue_usage']*100:.1f}%"
-            f"\n   총 수신 샘플: {stats['total_samples']:,}개"
-            f"\n   손실 샘플: {stats['dropped_samples']:,}개"
-            f"\n   손실률: {(stats['dropped_samples']/max(1,stats['total_samples'])*100):.2f}%"
-            f"\n   평균 샘플링 속도: {avg_rate:.1f} Hz"
-        )
+        # 수집 중일 때만 버퍼 상태 표시
+        if self.collecting:
+            print(
+                f"\n{status_emoji} [버퍼 상태]"
+                f"\n   큐 사용량: {self.data_queue.qsize()}/{self.data_queue.maxsize} ({current_usage*100:.1f}%)"
+                f"\n   최대 사용량: {stats['max_queue_usage']*100:.1f}%"
+                f"\n   총 수신 샘플: {stats['total_samples']:,}개"
+                f"\n   손실 샘플: {stats['dropped_samples']:,}개"
+                f"\n   손실률: {(stats['dropped_samples']/max(1,stats['total_samples'])*100):.2f}%"
+                f"\n   평균 샘플링 속도: {avg_rate:.1f} Hz"
+            )
 
-        if current_usage >= BUFFER_CRITICAL_THRESHOLD:
-            print("⚠️ 경고: 버퍼가 거의 가득 찼습니다! 데이터 손실 위험이 높습니다.")
-        elif current_usage >= BUFFER_WARNING_THRESHOLD:
-            print("⚠️ 주의: 버퍼 사용량이 높습니다.")
+            if current_usage >= BUFFER_CRITICAL_THRESHOLD:
+                print("⚠️ 경고: 버퍼가 거의 가득 찼습니다! 데이터 손실 위험이 높습니다.")
+            elif current_usage >= BUFFER_WARNING_THRESHOLD:
+                print("⚠️ 주의: 버퍼 사용량이 높습니다.")
 
     def _data_reception_worker(self):
         last_arduino_ms = None
         self._prev_reading = None
+        collection_start_time = None
 
         while not self.stop_event.is_set():
             try:
@@ -364,8 +406,17 @@ class SignGloveUnifiedCollector:
                             sampling_hz = 1000.0 / dt_ms
                         last_arduino_ms = arduino_ts
 
+                        # 수집 시작 시점 기준 상대 시간으로 변환
+                        if self.collecting:
+                            if collection_start_time is None:
+                                collection_start_time = arduino_ts
+                            relative_ts = arduino_ts - collection_start_time
+                        else:
+                            relative_ts = arduino_ts
+                            collection_start_time = None
+
                         reading = SignGloveSensorReading(
-                            timestamp_ms=arduino_ts,
+                            timestamp_ms=relative_ts,
                             recv_timestamp_ms=recv_time_ms,
                             pitch=float(parts[1]),
                             roll=float(parts[2]),
@@ -410,29 +461,30 @@ class SignGloveUnifiedCollector:
                             self.data_queue.put(reading)
                             self.update_buffer_stats(sample_received=True)
                             if self._dropped_samples:
-                                if BUFFER_DEBUG:
+                                if self.buffer_active and BUFFER_DEBUG:
                                     print(f"🐛 [BUFFER] 큐 정상화 - 누락된 샘플 {self._dropped_samples}개")
                                 self._dropped_samples = 0
                         else:
-                            self._dropped_samples += 1
-                            self.update_buffer_stats(sample_received=True, sample_dropped=True)
-                            if BUFFER_DEBUG and (self._dropped_samples == 1 or self._dropped_samples % BUFFER_DROP_LOG_INTERVAL == 0):
-                                print(f"⚠️ [BUFFER] 데이터 큐 포화 - 누락 누적 {self._dropped_samples}개")
-
-                        # 에피소드 수집 중이면 적재
+                            if self.buffer_active:
+                                self._dropped_samples += 1
+                                self.update_buffer_stats(sample_received=True, sample_dropped=True)
+                                if BUFFER_DEBUG and (self._dropped_samples == 1 or self._dropped_samples % BUFFER_DROP_LOG_INTERVAL == 0):
+                                    print(f"⚠️ [BUFFER] 데이터 큐 포화 - 누락 누적 {self._dropped_samples}개")                        # 에피소드 수집 중이면 적재
                         if self.collecting:
                             self.episode_data.append(reading)
-                            if len(self.episode_data) % 20 == 0:
-                                print(f"?? ?? ?... {len(self.episode_data)}? ?? (??: {sampling_hz:.1f}Hz)")
-                            if len(self.episode_data) >= self.samples_per_episode:
-                                print(f"? {self.current_class} ??? {self.samples_per_episode}? ?? ?? ??. ????? ???? ?? ?????.")
+                            current_samples = len(self.episode_data)
+                            if current_samples % 10 == 0:  # 10개 단위로 진행상황 표시
+                                progress = current_samples / self.samples_per_episode * 100
+                                progress_bar = "█" * int(progress/5) + "░" * (20 - int(progress/5))
+                                print(f"\r⏳ 수집 진행률: {progress_bar} {current_samples}/{self.samples_per_episode} ({progress:.1f}%)", end="")
+                            if current_samples >= self.samples_per_episode:
+                                print(f"\n✅ {self.current_class} 에피소드 샘플 {self.samples_per_episode}개 수집 완료")
                                 self.stop_episode()
-                                self.start_episode(self.current_class)
 
                     except (ValueError, IndexError) as e:
                         print(f"⚠️ 데이터 파싱 오류: {line} → {e}")
 
-                if BUFFER_DEBUG:
+                if BUFFER_DEBUG and self.collecting:  # 수집 중일 때만 버퍼 디버그 정보 출력
                     now = time.time()
                     if now - self._last_buffer_debug_ts >= BUFFER_DEBUG_INTERVAL:
                         in_waiting = 0
@@ -443,18 +495,105 @@ class SignGloveUnifiedCollector:
                                 in_waiting = -1
                         print(
                             f"🐛 [BUFFER] in_waiting={in_waiting} bytes | "
-                            f"queue={self.data_queue.qsize()}/{self.data_queue.maxsize} | "
-                            f"collecting={self.collecting}"
+                            f"queue={self.data_queue.qsize()}/{self.data_queue.maxsize}"
                         )
                         self._last_buffer_debug_ts = now
 
-                time.sleep(0.001)
+                # 샘플링 레이트 제어를 위한 동적 대기
+                self.adjust_sampling_rate()
+                time.sleep(self.buffer_stats['current_sleep_time'])
 
             except Exception as e:
                 print(f"❌ 데이터 수신 오류: {e}")
                 break
 
     # ------------------- UI: 클래스 선택/진행 표시 -------------------
+    def start_auto_collection(self, class_name: str):
+        """선택한 클래스의 모든 남은 유형을 자동으로 수집합니다."""
+        self.auto_collecting = True
+        
+        # 자동 수집 설정
+        MIN_EPISODE_DURATION = 3.0  # 최소 에피소드 수집 시간 (초)
+        MIN_SAMPLES_THRESHOLD = 40  # 최소 필요 샘플 수 
+        STABILIZATION_DELAY = 2.0   # 에피소드 간 안정화 대기 시간
+        
+        try:
+            while self.auto_collecting:
+                # 남은 유형 확인
+                remaining_types = []
+                for key, value in self.episode_types.items():
+                    count = self.collection_stats[class_name][key]
+                    if count < self.episodes_per_type:
+                        remaining_types.append(key)
+
+                if not remaining_types:
+                    print(f"\n✅ '{class_name}' 클래스의 모든 유형 수집이 완료되었습니다!")
+                    break
+
+                # 이전 에피소드의 데이터가 정리되고 버퍼가 안정화될 때까지 대기
+                time.sleep(STABILIZATION_DELAY)
+                
+                # 다음 유형 수집 시작
+                next_type = remaining_types[0]
+                print(f"\n⏳ '{class_name}' - '{self.episode_types[next_type]}' 유형 수집 시작...")
+                print(f"남은 유형: {len(remaining_types)}개")
+                print("(수집을 중단하려면 'Q' 키를 누르세요)")
+
+                # 시작하기 전에 버퍼 초기화
+                self.clear_buffer()
+                time.sleep(0.5)
+                
+                # 에피소드 시작
+                self.start_episode(class_name, next_type)
+                
+                # 데이터 수집 모니터링
+                episode_start = time.time()
+                last_sample_count = 0
+                
+                while self.auto_collecting and self.collecting:
+                    # 수집 중단 체크
+                    key = self.get_key()
+                    if key == 'q':
+                        print("\n🛑 자동 수집이 중단되었습니다.")
+                        self.auto_collecting = False
+                        break
+
+                    # 현재 수집된 샘플 수 확인
+                    current_samples = len(self.episode_data)
+                    if current_samples > last_sample_count:
+                        print(f"⏳ 데이터 수집 중... {current_samples}개 샘플")
+                        last_sample_count = current_samples
+                    
+                    # 충분한 데이터가 수집되었는지 확인
+                    if len(self.episode_data) >= self.samples_per_episode:
+                        print(f"✅ 목표 샘플 수집 완료: {len(self.episode_data)}개")
+                        break
+
+                    time.sleep(0.1)
+
+                # 데이터 유효성 검사
+                if not self.episode_data or len(self.episode_data) < MIN_SAMPLES_THRESHOLD:
+                    print(f"⚠️ 충분한 데이터가 수집되지 않았습니다 ({len(self.episode_data)} < {MIN_SAMPLES_THRESHOLD}). 다시 시도합니다.")
+                    self.stop_episode()
+                    continue
+                    
+                # 에피소드 종료 및 저장
+                self.stop_episode()
+                
+                # 자동 수집 중단 확인
+                if not self.auto_collecting:
+                    print("\n🛑 자동 수집이 중단되었습니다.")
+                    break
+
+        except KeyboardInterrupt:
+            print("\n🛑 자동 수집이 중단되었습니다.")
+        except Exception as e:
+            print(f"\n❌ 오류 발생: {e}")
+        finally:
+            self.auto_collecting = False
+            if self.collecting:
+                self.stop_episode()
+
     def show_class_selection(self):
         self.class_selection_mode = True
         print("\n🎯 한국어 수어 클래스 선택")
@@ -469,7 +608,7 @@ class SignGloveUnifiedCollector:
         for class_name in self.all_classes:
             target_info = self.collection_targets[class_name]
             current = sum(self.collection_stats[class_name].values())
-            target = 12 # 5 types * 5 collections
+            target = self.episodes_per_type * len(self.episode_types)  # 60회 * 5유형 = 300회
             total_current_for_all_classes += current
             total_target_for_all_classes += target
             remaining = max(0, target - current)
@@ -497,33 +636,71 @@ class SignGloveUnifiedCollector:
         return "█" * filled + "░" * (width - filled)
 
     # ------------------- 에피소드 수집/저장 -------------------
-    def start_episode(self, class_name: str):
+    def start_episode(self, class_name: str, auto_collect: bool = False):
         if self.collecting:
             self.stop_episode()
 
         if not self.serial_port or not self.serial_port.is_open:
             print("❌ 아두이노가 연결되지 않았습니다. 'C' 키로 연결하세요.")
             return
+            
+        # 버퍼 완전 초기화 및 안정화
+        self.clear_buffer()
+        time.sleep(FIXED_SLEEP_TIME * 10)  # 버퍼 안정화를 위한 대기
+        self.buffer_active = True  # 데이터 수집 시작 시 버퍼 활성화
+        
+        # 버퍼 통계 초기화
+        self.buffer_stats = {
+            'total_samples': 0,
+            'dropped_samples': 0,
+            'last_sample_time': None,
+            'max_queue_usage': 0,
+            'buffer_warnings': 0,
+            'last_buffer_check': time.time(),
+            'sample_rate_history': [],
+            'last_rate_control': time.time(),
+            'current_sleep_time': 0.001,
+        }
 
         # Show progress for each episode type
         print(f"\n📊 '{class_name}' 클래스 에피소드 유형별 진행 상황:")
+        remaining_types = []
         for key, value in self.episode_types.items():
             count = self.collection_stats[class_name][key]
             print(f"   {key}: {value} - {count}/{self.episodes_per_type}")
+            if count < self.episodes_per_type:
+                remaining_types.append(key)
 
-        # Select episode type
-        print("\n🖐️ 에피소드 유형 선택:")
-        for key, value in self.episode_types.items():
-            print(f"   {key}: {value}")
-        
-        choice = input("✨ 1-5번 중 원하는 에피소드 유형을 선택하고 Enter를 누르세요 (취소: Enter): ")
-        if choice not in self.episode_types:
-            print("🚫 에피소드 수집이 취소되었습니다.")
+        if not remaining_types:
+            print(f"✅ '{class_name}' 클래스의 모든 유형이 수집 완료되었습니다!")
             return
-        
-        if self.collection_stats[class_name][choice] >= self.episodes_per_type:
-            print(f"⚠️ '{self.episode_types[choice]}' 유형은 이미 5번 수집 완료했습니다.")
-            return
+
+        if auto_collect:
+            if not remaining_types:
+                print(f"✅ '{class_name}' 모든 유형 수집 완료!")
+                return
+            choice = remaining_types[0]
+            print(f"\n🤖 자동 수집: '{self.episode_types[choice]}' 유형 시작")
+        else:
+            # Select episode type
+            print("\n🖐️ 에피소드 유형 선택:")
+            for key in remaining_types:
+                print(f"   {key}: {self.episode_types[key]}")
+            print("   A: 모든 남은 유형 자동 수집")
+            
+            choice = input("✨ 유형 번호를 선택하거나 'A'를 입력하세요 (취소: Enter): ").upper()
+            if not choice:
+                print("🚫 에피소드 수집이 취소되었습니다.")
+                return
+            
+            if choice == 'A':
+                print("\n🤖 자동 수집 모드를 시작합니다...")
+                self.start_auto_collection(class_name)
+                return
+            
+            if choice not in self.episode_types:
+                print("🚫 잘못된 유형입니다.")
+                return
 
         self.current_episode_type = choice
         self.current_class = class_name
@@ -545,41 +722,79 @@ class SignGloveUnifiedCollector:
         print("💡 충분한 데이터 수집 후 'M' 키로 종료하세요!")
         print("⏱️ 권장 수집 시간: 3-5초 (자연스러운 수어 동작)")
 
+    def clear_buffer(self):
+        """버퍼와 큐를 완전히 비웁니다."""
+        # 현재 버퍼 상태 저장
+        was_active = self.buffer_active
+        self.buffer_active = False  # 버퍼 비활성화
+        
+        # 시리얼 입력 버퍼 비우기
+        if self.serial_port and self.serial_port.is_open:
+            self.serial_port.reset_input_buffer()
+            
+        # 큐 완전 비우기
+        while not self.data_queue.empty():
+            try:
+                self.data_queue.get_nowait()
+            except queue.Empty:
+                break
+        
+        # 버퍼 통계 초기화
+        self.buffer_stats.update({
+            'total_samples': 0,
+            'dropped_samples': 0,
+            'last_sample_time': None,
+            'max_queue_usage': 0,
+            'sample_rate_history': [],
+            'last_rate_control': time.time(),
+            'current_sleep_time': FIXED_SLEEP_TIME
+        })
+                
+        # 이전 버퍼 상태로 복원
+        self.buffer_active = was_active
+
     def stop_episode(self):
         if not self.collecting:
             print("⚠️ 수집 중이 아닙니다.")
-            return
+            return False  # 실패 상태 반환
 
         self.collecting = False
+        self.buffer_active = False  # 버퍼 비활성화
+        self.clear_buffer()  # 버퍼 비우기
 
         if not self.episode_data:
             print("⚠️ 수집된 데이터가 없습니다.")
-            return
+            return False  # 실패 상태 반환
 
         duration = time.time() - self.episode_start_time
         h5_save_path = self.save_episode_data()
         csv_save_path = self.save_episode_data_csv()
 
-        self.collection_stats[self.current_class][self.current_episode_type] += 1
-        self.session_stats[self.current_class] += 1
-        self.save_collection_progress()
+        if h5_save_path and csv_save_path:  # 파일 저장이 성공한 경우에만
+            self.collection_stats[self.current_class][self.current_episode_type] += 1
+            self.session_stats[self.current_class] += 1
+            self.save_collection_progress()
 
-        target_info = self.collection_targets.get(self.current_class, {})
-        current = sum(self.collection_stats[self.current_class].values())
-        target = 25 # 5 types * 5 collections
-        remaining = max(0, target - current)
-        progress = min(100, (current / target * 100)) if target > 0 else 0
+            target_info = self.collection_targets.get(self.current_class, {})
+            current = sum(self.collection_stats[self.current_class].values())
+            target = self.episodes_per_type * len(self.episode_types)
+            remaining = max(0, target - current)
+            progress = min(100, (current / target * 100)) if target > 0 else 0
 
-        print(f"\n✅ 에피소드 완료: '{self.current_class}' - 유형: {self.episode_types[self.current_episode_type]}")
-        print(f"⏱️ 수집 시간: {duration:.1f}초")
-        print(f"📊 데이터 샘플: {len(self.episode_data)}개")
-        if h5_save_path:
-            print(f"💾 H5 저장 경로: {h5_save_path}")
-        if csv_save_path:
-            print(f"💾 CSV 저장 경로: {csv_save_path}")
-        print(f"📈 진행률: {current}/{target} ({progress:.1f}%) - {remaining}개 남음")
-        if current >= target:
-            print(f"🎉 '{self.current_class}' 클래스 목표 달성!")
+            print(f"\n✅ 에피소드 완료: '{self.current_class}' - 유형: {self.episode_types[self.current_episode_type]}")
+            print(f"⏱️ 수집 시간: {duration:.1f}초")
+            print(f"📊 데이터 샘플: {len(self.episode_data)}개")
+            print(f"💾 H5 저장: {h5_save_path}")
+            print(f"💾 CSV 저장: {csv_save_path}")
+            print(f"📈 진행률: {current}/{target} ({progress:.1f}%) - {remaining}개 남음")
+            
+            if current >= target:
+                print(f"🎉 '{self.current_class}' 클래스 목표 달성!")
+                
+            return True  # 성공 상태 반환
+        else:
+            print("❌ 에피소드 저장 실패")
+            return False  # 실패 상태 반환
 
     def save_episode_data_csv(self) -> Optional[Path]:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
