@@ -476,10 +476,10 @@ class SignGloveUnifiedCollector:
                                 print(f"? {self.current_class} ??? {self.samples_per_episode}? ?? ?? ??. ????? ???? ?? ?????.")
                                 self.stop_episode()
                                 self.start_episode(self.current_class)
-
+'''
                     except (ValueError, IndexError) as e:
                         print(f"⚠️ 데이터 파싱 오류: {line} → {e}")
-'''
+
                 if self.collecting:
                     if not self.data_queue.full():
                         self.data_queue.put(reading)
