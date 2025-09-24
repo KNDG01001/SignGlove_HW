@@ -32,10 +32,18 @@ AUTO_YAWZERO = False  # 연결 직후 yawzero 자동 전송
 AUTO_ZERO = False     # 연결 직후 zero 자동 전송(출력 오프셋 0 기준)
 
 # 샘플링 레이트 제어
+<<<<<<< HEAD
 TARGET_SAMPLING_RATE = 33.3  # 목표 샘플링 레이트 (Hz)
 SAMPLING_RATE_TOLERANCE = 0.2  # 허용 오차 (±0.2Hz)
 RATE_CONTROL_INTERVAL = 0.1   # 레이트 제어 주기 (초)
 MIN_SLEEP_TIME = 0.001  # 최소 대기 시간 (초)
+=======
+TARGET_SAMPLING_RATE = 33.0  # 목표 샘플링 레이트 (Hz)
+SAMPLING_RATE_TOLERANCE = 0.1  # 허용 오차 (±0.1Hz)
+RATE_CONTROL_INTERVAL = 0.05   # 레이트 제어 주기 (초)
+MIN_SLEEP_TIME = 0.001  # 최소 대기 시간 (초)
+FIXED_SLEEP_TIME = 1.0 / TARGET_SAMPLING_RATE  # 고정 대기 시간
+>>>>>>> test_branch
 
 # 버퍼 디버그 옵션
 BUFFER_DEBUG = True   # True면 버퍼 스트림 디버그 정보를 주기적으로 출력
@@ -114,7 +122,11 @@ class SignGloveUnifiedCollector:
         for category in self.ksl_classes.values():
             self.all_classes.extend(category)
 
+<<<<<<< HEAD
         # 수집 목표 (60회 * 5유형 = 300회)
+=======
+        # 수집 목표 (5유형 * 60회 = 300회)
+>>>>>>> test_branch
         self.collection_targets = {
             class_name: {"target": 300, "description": f"'{class_name}'"} for class_name in self.all_classes
         }
@@ -128,7 +140,11 @@ class SignGloveUnifiedCollector:
             "5": "많이 손가락이 구부러짐",
         }
         self.samples_per_episode = 80  # 각 에피소드당 샘플 수 (2.4초 = 80 samples @33.3Hz)
+<<<<<<< HEAD
         self.episodes_per_type = 60   # 각 유형당 60번 수집
+=======
+        self.episodes_per_type = 60   # 각 유형당 60번 수집 (이전 12번에서 증가)
+>>>>>>> test_branch
         self.total_episodes_target = len(self.episode_types) * self.episodes_per_type  # 총 300번 (60회 * 5가지 유형)
         self.current_episode_type = None
 
@@ -283,6 +299,7 @@ class SignGloveUnifiedCollector:
         print("📡 데이터 수신 스레드 시작됨")
 
     def adjust_sampling_rate(self):
+<<<<<<< HEAD
         """현재 샘플링 레이트를 체크하고 필요한 경우 조정합니다."""
         now = time.time()
         stats = self.buffer_stats
@@ -313,6 +330,29 @@ class SignGloveUnifiedCollector:
     def update_buffer_stats(self, sample_received=True, sample_dropped=False):
         """버퍼 통계 정보를 업데이트합니다."""
         if not self.buffer_active:  # 버퍼가 비활성화되어 있으면 무시
+=======
+        """고정된 샘플링 레이트로 데이터 수집을 유지합니다."""
+        stats = self.buffer_stats
+        
+        if self.collecting:
+            # 고정된 샘플링 레이트 사용
+            stats['current_sleep_time'] = FIXED_SLEEP_TIME
+            
+            # 모니터링을 위한 통계 수집 (5초마다 한 번씩만)
+            now = time.time()
+            if now - stats['last_rate_control'] >= 5.0 and stats['sample_rate_history']:
+                current_rate = sum(stats['sample_rate_history'][-10:]) / min(10, len(stats['sample_rate_history']))
+                if BUFFER_DEBUG and abs(current_rate - TARGET_SAMPLING_RATE) > SAMPLING_RATE_TOLERANCE:
+                    print(f"\n⚠️ 샘플링 레이트 불안정: {current_rate:.1f}Hz")
+                stats['last_rate_control'] = now
+        else:
+            # 수집 중이 아닐 때는 더 긴 대기 시간 사용
+            stats['current_sleep_time'] = FIXED_SLEEP_TIME * 2
+
+    def update_buffer_stats(self, sample_received=True, sample_dropped=False):
+        """버퍼 통계 정보를 업데이트합니다."""
+        if not self.buffer_active or not self.collecting:  # 버퍼가 비활성화되어 있거나 수집 중이 아니면 무시
+>>>>>>> test_branch
             return
             
         now = time.time()
@@ -343,7 +383,11 @@ class SignGloveUnifiedCollector:
 
     def print_buffer_debug_info(self):
         """현재 버퍼 상태 정보를 출력합니다."""
+<<<<<<< HEAD
         if not self.buffer_active:  # 버퍼가 비활성화되어 있으면 무시
+=======
+        if not self.buffer_active or not self.collecting:  # 버퍼가 비활성화되어 있거나 수집 중이 아니면 무시
+>>>>>>> test_branch
             return
             
         stats = self.buffer_stats
@@ -358,20 +402,22 @@ class SignGloveUnifiedCollector:
         else:
             status_emoji = "🟢"  # 정상
 
-        print(
-            f"\n{status_emoji} [버퍼 상태]"
-            f"\n   큐 사용량: {self.data_queue.qsize()}/{self.data_queue.maxsize} ({current_usage*100:.1f}%)"
-            f"\n   최대 사용량: {stats['max_queue_usage']*100:.1f}%"
-            f"\n   총 수신 샘플: {stats['total_samples']:,}개"
-            f"\n   손실 샘플: {stats['dropped_samples']:,}개"
-            f"\n   손실률: {(stats['dropped_samples']/max(1,stats['total_samples'])*100):.2f}%"
-            f"\n   평균 샘플링 속도: {avg_rate:.1f} Hz"
-        )
+        # 수집 중일 때만 버퍼 상태 표시
+        if self.collecting:
+            print(
+                f"\n{status_emoji} [버퍼 상태]"
+                f"\n   큐 사용량: {self.data_queue.qsize()}/{self.data_queue.maxsize} ({current_usage*100:.1f}%)"
+                f"\n   최대 사용량: {stats['max_queue_usage']*100:.1f}%"
+                f"\n   총 수신 샘플: {stats['total_samples']:,}개"
+                f"\n   손실 샘플: {stats['dropped_samples']:,}개"
+                f"\n   손실률: {(stats['dropped_samples']/max(1,stats['total_samples'])*100):.2f}%"
+                f"\n   평균 샘플링 속도: {avg_rate:.1f} Hz"
+            )
 
-        if current_usage >= BUFFER_CRITICAL_THRESHOLD:
-            print("⚠️ 경고: 버퍼가 거의 가득 찼습니다! 데이터 손실 위험이 높습니다.")
-        elif current_usage >= BUFFER_WARNING_THRESHOLD:
-            print("⚠️ 주의: 버퍼 사용량이 높습니다.")
+            if current_usage >= BUFFER_CRITICAL_THRESHOLD:
+                print("⚠️ 경고: 버퍼가 거의 가득 찼습니다! 데이터 손실 위험이 높습니다.")
+            elif current_usage >= BUFFER_WARNING_THRESHOLD:
+                print("⚠️ 주의: 버퍼 사용량이 높습니다.")
 
     def _data_reception_worker(self):
         last_arduino_ms = None
@@ -478,17 +524,19 @@ class SignGloveUnifiedCollector:
                                     print(f"⚠️ [BUFFER] 데이터 큐 포화 - 누락 누적 {self._dropped_samples}개")                        # 에피소드 수집 중이면 적재
                         if self.collecting:
                             self.episode_data.append(reading)
-                            if len(self.episode_data) % 20 == 0:
-                                print(f"?? ?? ?... {len(self.episode_data)}? ?? (??: {sampling_hz:.1f}Hz)")
-                            if len(self.episode_data) >= self.samples_per_episode:
-                                print(f"? {self.current_class} ??? {self.samples_per_episode}? ?? ?? ??. ????? ???? ?? ?????.")
+                            current_samples = len(self.episode_data)
+                            if current_samples % 10 == 0:  # 10개 단위로 진행상황 표시
+                                progress = current_samples / self.samples_per_episode * 100
+                                progress_bar = "█" * int(progress/5) + "░" * (20 - int(progress/5))
+                                print(f"\r⏳ 수집 진행률: {progress_bar} {current_samples}/{self.samples_per_episode} ({progress:.1f}%)", end="")
+                            if current_samples >= self.samples_per_episode:
+                                print(f"\n✅ {self.current_class} 에피소드 샘플 {self.samples_per_episode}개 수집 완료")
                                 self.stop_episode()
-                                self.start_episode(self.current_class)
 
                     except (ValueError, IndexError) as e:
                         print(f"⚠️ 데이터 파싱 오류: {line} → {e}")
 
-                if BUFFER_DEBUG:
+                if BUFFER_DEBUG and self.collecting:  # 수집 중일 때만 버퍼 디버그 정보 출력
                     now = time.time()
                     if now - self._last_buffer_debug_ts >= BUFFER_DEBUG_INTERVAL:
                         in_waiting = 0
@@ -499,8 +547,7 @@ class SignGloveUnifiedCollector:
                                 in_waiting = -1
                         print(
                             f"🐛 [BUFFER] in_waiting={in_waiting} bytes | "
-                            f"queue={self.data_queue.qsize()}/{self.data_queue.maxsize} | "
-                            f"collecting={self.collecting}"
+                            f"queue={self.data_queue.qsize()}/{self.data_queue.maxsize}"
                         )
                         self._last_buffer_debug_ts = now
 
@@ -516,11 +563,22 @@ class SignGloveUnifiedCollector:
     def start_auto_collection(self, class_name: str):
         """선택한 클래스의 모든 남은 유형을 자동으로 수집합니다."""
         self.auto_collecting = True
+<<<<<<< HEAD
         MIN_EPISODE_DURATION = 3.0  # 최소 에피소드 수집 시간 (초)
         MIN_SAMPLES_THRESHOLD = 40  # 최소 필요 샘플 수 (예: 샘플링 레이트 33.3Hz 기준 ~1.2초)
         
         try:
             while True:
+=======
+        
+        # 자동 수집 설정
+        MIN_EPISODE_DURATION = 3.0  # 최소 에피소드 수집 시간 (초)
+        MIN_SAMPLES_THRESHOLD = 40  # 최소 필요 샘플 수 
+        STABILIZATION_DELAY = 2.0   # 에피소드 간 안정화 대기 시간
+        
+        try:
+            while self.auto_collecting:
+>>>>>>> test_branch
                 # 남은 유형 확인
                 remaining_types = []
                 for key, value in self.episode_types.items():
@@ -533,7 +591,11 @@ class SignGloveUnifiedCollector:
                     break
 
                 # 이전 에피소드의 데이터가 정리되고 버퍼가 안정화될 때까지 대기
+<<<<<<< HEAD
                 time.sleep(2.0)  # 2초 대기
+=======
+                time.sleep(STABILIZATION_DELAY)
+>>>>>>> test_branch
                 
                 # 다음 유형 수집 시작
                 next_type = remaining_types[0]
@@ -541,6 +603,7 @@ class SignGloveUnifiedCollector:
                 print(f"남은 유형: {len(remaining_types)}개")
                 print("(수집을 중단하려면 'Q' 키를 누르세요)")
 
+<<<<<<< HEAD
                 # 시작하기 전에 버퍼 안정화 확인
                 self.clear_buffer()  # 버퍼 완전히 비우기
                 time.sleep(0.5)  # 0.5초 추가 대기
@@ -553,22 +616,53 @@ class SignGloveUnifiedCollector:
                 last_sample_count = 0
                 
                 while time.time() - episode_start < MIN_EPISODE_DURATION:
+=======
+                # 시작하기 전에 버퍼 초기화
+                self.clear_buffer()
+                time.sleep(0.5)
+                
+                # 에피소드 시작
+                self.start_episode(class_name, next_type)
+                
+                # 데이터 수집 모니터링
+                episode_start = time.time()
+                last_sample_count = 0
+                
+                while self.auto_collecting and self.collecting:
+>>>>>>> test_branch
                     # 수집 중단 체크
                     key = self.get_key()
                     if key == 'q':
                         print("\n🛑 자동 수집이 중단되었습니다.")
                         self.auto_collecting = False
+<<<<<<< HEAD
                         return
                         
+=======
+                        break
+
+>>>>>>> test_branch
                     # 현재 수집된 샘플 수 확인
                     current_samples = len(self.episode_data)
                     if current_samples > last_sample_count:
                         print(f"⏳ 데이터 수집 중... {current_samples}개 샘플")
                         last_sample_count = current_samples
+<<<<<<< HEAD
                         
                     time.sleep(0.1)
                 
                 # 충분한 데이터가 수집되었는지 확인
+=======
+                    
+                    # 충분한 데이터가 수집되었는지 확인
+                    if len(self.episode_data) >= self.samples_per_episode:
+                        print(f"✅ 목표 샘플 수집 완료: {len(self.episode_data)}개")
+                        break
+
+                    time.sleep(0.1)
+
+                # 데이터 유효성 검사
+>>>>>>> test_branch
                 if not self.episode_data or len(self.episode_data) < MIN_SAMPLES_THRESHOLD:
                     print(f"⚠️ 충분한 데이터가 수집되지 않았습니다 ({len(self.episode_data)} < {MIN_SAMPLES_THRESHOLD}). 다시 시도합니다.")
                     self.stop_episode()
@@ -584,8 +678,17 @@ class SignGloveUnifiedCollector:
 
         except KeyboardInterrupt:
             print("\n🛑 자동 수집이 중단되었습니다.")
+<<<<<<< HEAD
         finally:
             self.auto_collecting = False
+=======
+        except Exception as e:
+            print(f"\n❌ 오류 발생: {e}")
+        finally:
+            self.auto_collecting = False
+            if self.collecting:
+                self.stop_episode()
+>>>>>>> test_branch
 
     def show_class_selection(self):
         self.class_selection_mode = True
@@ -601,7 +704,7 @@ class SignGloveUnifiedCollector:
         for class_name in self.all_classes:
             target_info = self.collection_targets[class_name]
             current = sum(self.collection_stats[class_name].values())
-            target = 12 # 5 types * 5 collections
+            target = self.episodes_per_type * len(self.episode_types)  # 60회 * 5유형 = 300회
             total_current_for_all_classes += current
             total_target_for_all_classes += target
             remaining = max(0, target - current)
@@ -637,8 +740,14 @@ class SignGloveUnifiedCollector:
             print("❌ 아두이노가 연결되지 않았습니다. 'C' 키로 연결하세요.")
             return
             
+<<<<<<< HEAD
         # 버퍼 초기화 및 활성화
         self.clear_buffer()
+=======
+        # 버퍼 완전 초기화 및 안정화
+        self.clear_buffer()
+        time.sleep(FIXED_SLEEP_TIME * 10)  # 버퍼 안정화를 위한 대기
+>>>>>>> test_branch
         self.buffer_active = True  # 데이터 수집 시작 시 버퍼 활성화
         
         # 버퍼 통계 초기화
@@ -715,16 +824,42 @@ class SignGloveUnifiedCollector:
         print("⏱️ 권장 수집 시간: 3-5초 (자연스러운 수어 동작)")
 
     def clear_buffer(self):
+<<<<<<< HEAD
         """버퍼와 큐를 비웁니다."""
+=======
+        """버퍼와 큐를 완전히 비웁니다."""
+>>>>>>> test_branch
         # 현재 버퍼 상태 저장
         was_active = self.buffer_active
         self.buffer_active = False  # 버퍼 비활성화
         
+<<<<<<< HEAD
+=======
+        # 시리얼 입력 버퍼 비우기
+        if self.serial_port and self.serial_port.is_open:
+            self.serial_port.reset_input_buffer()
+            
+        # 큐 완전 비우기
+>>>>>>> test_branch
         while not self.data_queue.empty():
             try:
                 self.data_queue.get_nowait()
             except queue.Empty:
                 break
+<<<<<<< HEAD
+=======
+        
+        # 버퍼 통계 초기화
+        self.buffer_stats.update({
+            'total_samples': 0,
+            'dropped_samples': 0,
+            'last_sample_time': None,
+            'max_queue_usage': 0,
+            'sample_rate_history': [],
+            'last_rate_control': time.time(),
+            'current_sleep_time': FIXED_SLEEP_TIME
+        })
+>>>>>>> test_branch
                 
         # 이전 버퍼 상태로 복원
         self.buffer_active = was_active
