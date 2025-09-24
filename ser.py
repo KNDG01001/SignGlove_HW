@@ -452,7 +452,7 @@ class SignGloveUnifiedCollector:
                                 )
 
                         self._prev_reading = reading
-
+'''
                         # 큐로 전달
                         if not self.data_queue.full():
                             self.data_queue.put(reading)
@@ -479,6 +479,20 @@ class SignGloveUnifiedCollector:
 
                     except (ValueError, IndexError) as e:
                         print(f"⚠️ 데이터 파싱 오류: {line} → {e}")
+'''
+                if self.collecting:
+                    if not self.data_queue.full():
+                        self.data_queue.put(reading)
+                        self.update_buffer_stats(sample_received=True)
+                        if self._dropped_samples:
+                            if BUFFER_DEBUG:
+                                print(f"🐛 [BUFFER] 큐 정상화 - 누락된 샘플 {self._dropped_samples}개")
+                            self._dropped_samples = 0
+                    else:
+                        self._dropped_samples += 1
+                        self.update_buffer_stats(sample_received=True, sample_dropped=True)
+                        if BUFFER_DEBUG and (self._dropped_samples == 1 or self._dropped_samples % BUFFER_DROP_LOG_INTERVAL == 0):
+                            print(f"⚠️ [BUFFER] 데이터 큐 포화 - 누락 누적 {self._dropped_samples}개")
 
                 if BUFFER_DEBUG:
                     now = time.time()
